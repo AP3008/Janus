@@ -322,10 +322,16 @@ async fn proxy_handler(
                                 if !user_text_bg.is_empty() {
                                     match embedder.embed_one(&user_text_bg).await {
                                         Ok(embedding) => {
+                                            // Strip thinking blocks before caching to avoid
+                                            // "each thinking block must contain thinking" errors
+                                            // when cached responses are round-tripped through
+                                            // conversation history
+                                            let cacheable = stream_reassemble::strip_thinking_blocks(&response_bytes)
+                                                .unwrap_or_else(|| response_bytes.to_vec());
                                             if let Err(e) = cache
                                                 .put(
                                                     &embedding,
-                                                    &response_bytes,
+                                                    &cacheable,
                                                     &cache_scope_bg,
                                                     tokens_saved,
                                                     state_bg.config.cache.ttl_seconds,
@@ -420,10 +426,13 @@ async fn proxy_handler(
             if !user_text_for_cache.is_empty() && !response_has_tool_use(&response_bytes) {
                 match embedder.embed_one(&user_text_for_cache).await {
                     Ok(embedding) => {
+                        // Strip thinking blocks before caching
+                        let cacheable = stream_reassemble::strip_thinking_blocks(&response_bytes)
+                            .unwrap_or_else(|| response_bytes.to_vec());
                         if let Err(e) = cache
                             .put(
                                 &embedding,
-                                &response_bytes,
+                                &cacheable,
                                 &cache_scope,
                                 tokens_saved,
                                 state.config.cache.ttl_seconds,

@@ -375,6 +375,19 @@ pub fn json_to_sse(response_json: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Strip thinking-type content blocks from a JSON response before caching.
+/// Thinking blocks cause errors when round-tripped through conversation history
+/// ("each thinking block must contain thinking"), and have no value in cached responses.
+pub fn strip_thinking_blocks(response_json: &[u8]) -> Option<Vec<u8>> {
+    let mut msg: serde_json::Value = serde_json::from_slice(response_json).ok()?;
+    if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+        content.retain(|block| {
+            block.get("type").and_then(|t| t.as_str()) != Some("thinking")
+        });
+    }
+    serde_json::to_vec(&msg).ok()
+}
+
 fn write_sse_event(out: &mut Vec<u8>, event_type: &str, data: &serde_json::Value) {
     use std::fmt::Write;
     let json = serde_json::to_string(data).unwrap_or_default();
