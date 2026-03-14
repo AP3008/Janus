@@ -15,7 +15,7 @@ use crate::cache::SemanticCache;
 use crate::config::JanusConfig;
 use crate::embed::Embedder;
 use crate::metrics::CacheStatus;
-use crate::session::{SessionStore, self};
+use crate::session::{self, InstanceStore};
 use crate::stream_reassemble::{self, StreamTee};
 use crate::tokenizer::Tokenizer;
 use crate::tui::{ProxyUpdate, TuiMessage};
@@ -27,7 +27,7 @@ pub struct AppState {
     pub start_time: Instant,
     pub tokenizer: Tokenizer,
     pub tui_tx: mpsc::UnboundedSender<TuiMessage>,
-    pub session_store: SessionStore,
+    pub instance_store: InstanceStore,
     pub cache: Option<Box<dyn SemanticCache>>,
     pub embedder: Option<Embedder>,
 }
@@ -84,6 +84,9 @@ async fn proxy_handler(
         .unwrap_or("unknown")
         .to_string();
 
+    // Derive instance ID from system prompt to isolate different Claude Code processes
+    let instance_id = session::derive_instance_id(&body_json);
+
     // Derive session ID early (before cache lookup) for session tracking
     let session_id = if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
         session::SessionStore::derive_session_id(messages)
@@ -91,13 +94,16 @@ async fn proxy_handler(
         "default".to_string()
     };
 
+    // Scope cache by instance to prevent cross-instance cache hits
+    let cache_scope = format!("{}/{}", instance_id, model_id);
+
     if state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
             if !user_text_for_cache.is_empty() {
                 match embedder.embed_one(&user_text_for_cache).await {
                     Ok(embedding) => {
                         match cache
-                            .get(&embedding, state.config.cache.similarity_cutoff, &model_id)
+                            .get(&embedding, state.config.cache.similarity_cutoff, &cache_scope)
                             .await
                         {
                             Ok(Some(cached)) => {
@@ -108,6 +114,7 @@ async fn proxy_handler(
                                 );
 
                                 let _ = state.tui_tx.send(TuiMessage::RequestCompleted {
+                                    instance_id: instance_id.clone(),
                                     session_id: session_id.clone(),
                                     update: ProxyUpdate {
                                         tokens_original: tokens_before,
@@ -165,10 +172,12 @@ async fn proxy_handler(
         }
     }
 
-    let session_data = state.session_store.get_or_create(&session_id);
+    let instance = state.instance_store.get_or_create(&instance_id);
+    let session_data = instance.session_store.get_or_create(&session_id);
 
     // Signal request started for session tracking
     let _ = state.tui_tx.send(TuiMessage::RequestStarted {
+        instance_id: instance_id.clone(),
         session_id: session_id.clone(),
     });
 
@@ -295,7 +304,8 @@ async fn proxy_handler(
             // Spawn background task to cache the response and signal stream completion
             let state_bg = state.clone();
             let user_text_bg = user_text_for_cache.clone();
-            let model_id_bg = model_id.clone();
+            let cache_scope_bg = cache_scope.clone();
+            let instance_id_bg = instance_id.clone();
             let session_id_bg = session_id.clone();
             tokio::spawn(async move {
                 match rx.await {
@@ -316,7 +326,7 @@ async fn proxy_handler(
                                                 .put(
                                                     &embedding,
                                                     &response_bytes,
-                                                    &model_id_bg,
+                                                    &cache_scope_bg,
                                                     tokens_saved,
                                                     state_bg.config.cache.ttl_seconds,
                                                 )
@@ -355,6 +365,7 @@ async fn proxy_handler(
                 }
                 // Signal stream completion (fires on both success and client disconnect)
                 let _ = state_bg.tui_tx.send(TuiMessage::RequestCompleted {
+                    instance_id: instance_id_bg,
                     session_id: session_id_bg,
                     update: stream_update,
                 });
@@ -369,10 +380,12 @@ async fn proxy_handler(
         } else {
             // Non-cacheable streaming: passthrough with completion tracking
             let tui_tx = state.tui_tx.clone();
+            let instance_id_bg = instance_id.clone();
             let session_id_bg = session_id.clone();
             let tracker = StreamTracker {
                 tui_tx,
                 message: Some(TuiMessage::RequestCompleted {
+                    instance_id: instance_id_bg,
                     session_id: session_id_bg,
                     update: stream_update,
                 }),
@@ -411,7 +424,7 @@ async fn proxy_handler(
                             .put(
                                 &embedding,
                                 &response_bytes,
-                                &model_id,
+                                &cache_scope,
                                 tokens_saved,
                                 state.config.cache.ttl_seconds,
                             )
@@ -446,6 +459,7 @@ async fn proxy_handler(
 
     // Send update to TUI
     let _ = state.tui_tx.send(TuiMessage::RequestCompleted {
+        instance_id,
         session_id,
         update: ProxyUpdate {
             tokens_original: tokens_before,

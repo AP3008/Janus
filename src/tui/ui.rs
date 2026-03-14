@@ -162,6 +162,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
     // Build session indicator spans
     let (active, idle, _ended) = app.session_counts();
+    let num_instances = app.instance_count();
     let mut header_spans = vec![
         Span::styled(
             " JANUS ",
@@ -179,6 +180,18 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &TuiApp) {
             Style::default().fg(status_color),
         ),
     ];
+
+    if num_instances > 0 {
+        header_spans.push(Span::styled("  │ ", Style::default().fg(Color::DarkGray)));
+        header_spans.push(Span::styled(
+            format!(
+                "{} instance{}",
+                num_instances,
+                if num_instances != 1 { "s" } else { "" }
+            ),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
 
     if active > 0 || idle > 0 {
         header_spans.push(Span::styled("  │ ", Style::default().fg(Color::DarkGray)));
@@ -561,7 +574,7 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &TuiApp) {
             .add_modifier(Modifier::BOLD),
     ))];
 
-    for (id, info) in &sorted {
+    for (inst_id, sess_id, info) in &sorted {
         let state = info.state();
         let (icon, color) = match state {
             SessionState::Active => ("●", Color::Green),
@@ -569,7 +582,9 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &TuiApp) {
             SessionState::Ended => ("○", Color::DarkGray),
         };
 
-        let truncated_id = if id.len() > 6 { &id[..6] } else { id };
+        // Show truncated instance and session IDs
+        let inst_short = if inst_id.len() > 9 { &inst_id[5..9] } else { inst_id.as_str() };
+        let sess_short = if sess_id.len() > 6 { &sess_id[..6] } else { sess_id.as_str() };
         let status_text = if info.in_flight > 0 {
             format!("{} in-flight", info.in_flight)
         } else {
@@ -584,7 +599,9 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &TuiApp) {
             Span::raw("  "),
             Span::styled(icon, Style::default().fg(color)),
             Span::raw(" "),
-            Span::styled(truncated_id, Style::default().fg(Color::DarkGray)),
+            Span::styled(inst_short, Style::default().fg(Color::Cyan)),
+            Span::styled(":", Style::default().fg(Color::DarkGray)),
+            Span::styled(sess_short, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(status_text, Style::default().fg(color)),
             Span::styled(

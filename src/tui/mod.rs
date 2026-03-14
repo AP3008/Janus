@@ -40,9 +40,11 @@ pub struct ProxyUpdate {
 #[derive(Debug, Clone)]
 pub enum TuiMessage {
     RequestStarted {
+        instance_id: String,
         session_id: String,
     },
     RequestCompleted {
+        instance_id: String,
         session_id: String,
         update: ProxyUpdate,
     },
@@ -99,6 +101,29 @@ impl SessionInfo {
     }
 }
 
+/// Per-instance tracking: groups sessions belonging to the same Claude Code process
+pub struct InstanceInfo {
+    pub sessions: HashMap<String, SessionInfo>,
+    pub last_activity: Instant,
+    pub total_requests: u64,
+    pub tokens_saved: u64,
+}
+
+impl InstanceInfo {
+    pub fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            last_activity: Instant::now(),
+            total_requests: 0,
+            tokens_saved: 0,
+        }
+    }
+
+    pub fn should_cleanup(&self) -> bool {
+        self.sessions.values().all(|s| s.should_cleanup())
+    }
+}
+
 /// TUI application state
 pub struct TuiApp {
     pub should_quit: bool,
@@ -113,7 +138,7 @@ pub struct TuiApp {
     pub listen_addr: String,
     pub input_cost_per_1k: f64,
     pub tick_count: u64,
-    pub sessions: HashMap<String, SessionInfo>,
+    pub instances: HashMap<String, InstanceInfo>,
 }
 
 impl TuiApp {
@@ -131,7 +156,7 @@ impl TuiApp {
             listen_addr,
             input_cost_per_1k,
             tick_count: 0,
-            sessions: HashMap::new(),
+            instances: HashMap::new(),
         }
     }
 
@@ -145,11 +170,10 @@ impl TuiApp {
                 self.token_history_compressed = TokenHistory::new(30);
                 self.last_request = None;
                 self.stage_breakdown.clear();
-                self.sessions.clear();
+                self.instances.clear();
             }
             KeyCode::Char('f') => {
                 // Cache flush would be handled via a command channel back to proxy
-                // For now just log
             }
             KeyCode::Up => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
@@ -167,20 +191,27 @@ impl TuiApp {
         }
 
         match msg {
-            TuiMessage::RequestStarted { session_id } => {
-                let session = self.sessions.entry(session_id).or_insert_with(SessionInfo::new);
+            TuiMessage::RequestStarted { instance_id, session_id } => {
+                let instance = self.instances.entry(instance_id).or_insert_with(InstanceInfo::new);
+                instance.last_activity = Instant::now();
+                let session = instance.sessions.entry(session_id).or_insert_with(SessionInfo::new);
                 session.in_flight += 1;
                 session.last_activity = Instant::now();
             }
-            TuiMessage::RequestCompleted { session_id, update } => {
-                // Update session tracking
-                let session = self.sessions.entry(session_id).or_insert_with(SessionInfo::new);
+            TuiMessage::RequestCompleted { instance_id, session_id, update } => {
+                let instance = self.instances.entry(instance_id).or_insert_with(InstanceInfo::new);
+                instance.last_activity = Instant::now();
+                instance.total_requests += 1;
+                let saved = update.tokens_original.saturating_sub(update.tokens_compressed) as u64;
+                instance.tokens_saved += saved;
+
+                let session = instance.sessions.entry(session_id).or_insert_with(SessionInfo::new);
                 session.in_flight = session.in_flight.saturating_sub(1);
                 session.last_activity = Instant::now();
                 session.total_requests += 1;
-                session.tokens_saved += update.tokens_original.saturating_sub(update.tokens_compressed) as u64;
+                session.tokens_saved += saved;
 
-                // Update aggregate stats (same logic as old on_proxy_event)
+                // Update aggregate stats
                 self.stats.total_requests += 1;
                 self.stats.total_tokens_original += update.tokens_original as u64;
                 self.stats.total_tokens_compressed += update.tokens_compressed as u64;
@@ -228,25 +259,37 @@ impl TuiApp {
         }
     }
 
-    /// Count sessions by state for display
+    /// Count sessions by state across all instances
     pub fn session_counts(&self) -> (usize, usize, usize) {
         let mut active = 0;
         let mut idle = 0;
         let mut ended = 0;
-        for session in self.sessions.values() {
-            match session.state() {
-                SessionState::Active => active += 1,
-                SessionState::Idle => idle += 1,
-                SessionState::Ended => ended += 1,
+        for instance in self.instances.values() {
+            for session in instance.sessions.values() {
+                match session.state() {
+                    SessionState::Active => active += 1,
+                    SessionState::Idle => idle += 1,
+                    SessionState::Ended => ended += 1,
+                }
             }
         }
         (active, idle, ended)
     }
 
+    /// Number of tracked instances
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
+
     /// Get sessions sorted by last activity (most recent first), limited to 5
-    pub fn sorted_sessions(&self) -> Vec<(&String, &SessionInfo)> {
-        let mut entries: Vec<_> = self.sessions.iter().collect();
-        entries.sort_by(|a, b| b.1.last_activity.cmp(&a.1.last_activity));
+    /// Returns (instance_id, session_id, &SessionInfo) tuples
+    pub fn sorted_sessions(&self) -> Vec<(&String, &String, &SessionInfo)> {
+        let mut entries: Vec<_> = self.instances.iter()
+            .flat_map(|(inst_id, inst)| {
+                inst.sessions.iter().map(move |(sess_id, sess)| (inst_id, sess_id, sess))
+            })
+            .collect();
+        entries.sort_by(|a, b| b.2.last_activity.cmp(&a.2.last_activity));
         entries.truncate(5);
         entries
     }
@@ -298,7 +341,7 @@ pub fn run_tui(
 
         // Auto-cleanup old ended sessions (every ~5 seconds = 50 ticks)
         if app.tick_count % 50 == 0 {
-            app.sessions.retain(|_, info| !info.should_cleanup());
+            app.instances.retain(|_, inst| !inst.should_cleanup());
         }
     }
 

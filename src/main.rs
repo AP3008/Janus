@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
             let tok = tokenizer::Tokenizer::new();
 
-            let session_store = session::SessionStore::new();
+            let instance_store = session::InstanceStore::new();
 
             // Initialize semantic cache (graceful degradation if Redis unavailable)
             let (cache_box, embedder): (
@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 start_time: Instant::now(),
                 tokenizer: tok,
                 tui_tx: tui_tx.clone(),
-                session_store,
+                instance_store,
                 cache: cache_box,
                 embedder,
             });
