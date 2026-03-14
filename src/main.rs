@@ -1,4 +1,6 @@
+mod cache;
 mod config;
+mod embed;
 mod metrics;
 mod pipeline;
 mod proxy;
@@ -32,6 +34,27 @@ enum Commands {
     },
     /// Run compression benchmarks
     Benchmark,
+    /// Cache management
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Flush all cached entries
+    Flush {
+        /// Path to config file
+        #[arg(short, long, default_value = "janus.toml")]
+        config: PathBuf,
+    },
+    /// Show cache statistics
+    Stats {
+        /// Path to config file
+        #[arg(short, long, default_value = "janus.toml")]
+        config: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -73,6 +96,37 @@ async fn main() -> anyhow::Result<()> {
 
             let session_store = session::SessionStore::new();
 
+            // Initialize semantic cache (graceful degradation if Redis unavailable)
+            let (cache_box, embedder): (
+                Option<Box<dyn cache::SemanticCache>>,
+                Option<embed::Embedder>,
+            ) = if janus_config.cache.enabled {
+                match cache::redis_cache::RedisSemanticCache::new(
+                    &janus_config.cache.redis_url,
+                )
+                .await
+                {
+                    Ok(redis_cache) => {
+                        match embed::Embedder::new() {
+                            Ok(emb) => {
+                                tracing::info!("Semantic cache enabled with Redis");
+                                (Some(Box::new(redis_cache) as Box<dyn cache::SemanticCache>), Some(emb))
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to initialize embedder, cache disabled");
+                                (None, None)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Redis unavailable, cache disabled");
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
             let state = Arc::new(proxy::AppState {
                 config: janus_config,
                 client: reqwest::Client::new(),
@@ -80,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
                 tokenizer: tok,
                 tui_tx: tui_tx.clone(),
                 session_store,
+                cache: cache_box,
+                embedder,
             });
 
             let app = proxy::create_router(state);
@@ -122,6 +178,33 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Benchmark => {
             run_benchmark()?;
+        }
+        Commands::Cache { action } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+                .init();
+
+            match action {
+                CacheAction::Flush { config } => {
+                    let janus_config = config::JanusConfig::load(&config)?;
+                    let redis_cache = cache::redis_cache::RedisSemanticCache::new(
+                        &janus_config.cache.redis_url,
+                    )
+                    .await?;
+                    let count = cache::SemanticCache::flush(&redis_cache).await?;
+                    println!("Flushed {} cached entries", count);
+                }
+                CacheAction::Stats { config } => {
+                    let janus_config = config::JanusConfig::load(&config)?;
+                    let redis_cache = cache::redis_cache::RedisSemanticCache::new(
+                        &janus_config.cache.redis_url,
+                    )
+                    .await?;
+                    let stats = cache::SemanticCache::stats(&redis_cache).await?;
+                    println!("Cache Statistics:");
+                    println!("  Total entries: {}", stats.total_entries);
+                }
+            }
         }
     }
 

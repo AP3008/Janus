@@ -43,6 +43,21 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 ratatui = "0.29"
 crossterm = "0.28"
 
+# Embedding
+fastembed = "5"
+
+# Cache
+redis = { version = "1", features = ["tokio-comp"] }
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+# AST pruning
+tree-sitter = "0.26"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+
 # Session state
 dashmap = "6"
 

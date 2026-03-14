@@ -10,7 +10,9 @@ use reqwest::Client;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::cache::SemanticCache;
 use crate::config::JanusConfig;
+use crate::embed::Embedder;
 use crate::metrics::CacheStatus;
 use crate::session::{SessionStore, self};
 use crate::tokenizer::Tokenizer;
@@ -24,6 +26,8 @@ pub struct AppState {
     pub tokenizer: Tokenizer,
     pub tui_tx: mpsc::UnboundedSender<ProxyUpdate>,
     pub session_store: SessionStore,
+    pub cache: Option<Box<dyn SemanticCache>>,
+    pub embedder: Option<Embedder>,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -57,6 +61,75 @@ async fn proxy_handler(
     })?;
 
     let tokens_before = state.tokenizer.count_message_tokens(&body_json);
+
+    // Check if request is stateless (cacheable): exactly 1 user message, 0 assistant messages
+    let is_stateless = is_stateless_request(&body_json);
+
+    // Try semantic cache for stateless requests
+    let model_id = body_json
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    if is_stateless && state.config.cache.enabled {
+        if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
+            // Extract user message text for embedding
+            let user_text = extract_user_text(&body_json);
+            if !user_text.is_empty() {
+                match embedder.embed_one(&user_text).await {
+                    Ok(embedding) => {
+                        match cache
+                            .get(&embedding, state.config.cache.similarity_cutoff, &model_id)
+                            .await
+                        {
+                            Ok(Some(cached)) => {
+                                tracing::info!(
+                                    similarity = cached.similarity,
+                                    tokens_saved = cached.tokens_saved,
+                                    "Cache HIT"
+                                );
+
+                                let _ = state.tui_tx.send(ProxyUpdate {
+                                    tokens_original: tokens_before,
+                                    tokens_compressed: 0,
+                                    events: Vec::new(),
+                                    tool_calls: Vec::new(),
+                                    cache_status: CacheStatus::Hit {
+                                        similarity: cached.similarity,
+                                    },
+                                    pipeline_duration: std::time::Duration::ZERO,
+                                    upstream_duration: None,
+                                });
+
+                                let mut response =
+                                    Response::new(Body::from(cached.response_body));
+                                *response.status_mut() = StatusCode::OK;
+                                response.headers_mut().insert(
+                                    "content-type",
+                                    "application/json".parse().unwrap(),
+                                );
+                                response.headers_mut().insert(
+                                    "x-janus-cache",
+                                    "HIT".parse().unwrap(),
+                                );
+                                return Ok(response);
+                            }
+                            Ok(None) => {
+                                tracing::debug!("Cache MISS");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Cache lookup failed, continuing without cache");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Embedding failed, skipping cache");
+                    }
+                }
+            }
+        }
+    }
 
     // Derive session ID for dedup
     let session_id = if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
@@ -140,6 +213,42 @@ async fn proxy_handler(
         StatusCode::BAD_GATEWAY
     })?;
 
+    // Store in cache if stateless and successful
+    let cache_status = if is_stateless && status == StatusCode::OK && state.config.cache.enabled {
+        if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
+            let user_text = extract_user_text(&body_json);
+            if !user_text.is_empty() {
+                match embedder.embed_one(&user_text).await {
+                    Ok(embedding) => {
+                        if let Err(e) = cache
+                            .put(
+                                &embedding,
+                                &response_bytes,
+                                &model_id,
+                                tokens_saved,
+                                state.config.cache.ttl_seconds,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to store in cache");
+                        }
+                        CacheStatus::Miss
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Embedding failed for cache store");
+                        CacheStatus::Skipped
+                    }
+                }
+            } else {
+                CacheStatus::Skipped
+            }
+        } else {
+            CacheStatus::Skipped
+        }
+    } else {
+        CacheStatus::Skipped
+    };
+
     tracing::info!(
         tokens_in = tokens_before,
         tokens_out = tokens_after,
@@ -154,7 +263,7 @@ async fn proxy_handler(
         tokens_compressed: tokens_after,
         events: pipeline_result.events,
         tool_calls: pipeline_result.tool_calls,
-        cache_status: CacheStatus::Skipped,
+        cache_status,
         pipeline_duration,
         upstream_duration: Some(upstream_duration),
     });
@@ -164,6 +273,47 @@ async fn proxy_handler(
     *response.headers_mut() = response_headers;
 
     Ok(response)
+}
+
+/// Check if request is stateless (exactly 1 user message, 0 assistant messages)
+fn is_stateless_request(body: &serde_json::Value) -> bool {
+    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+        let mut user_count = 0;
+        let mut assistant_count = 0;
+        for msg in messages {
+            match msg.get("role").and_then(|r| r.as_str()) {
+                Some("user") => user_count += 1,
+                Some("assistant") => assistant_count += 1,
+                _ => {}
+            }
+        }
+        user_count == 1 && assistant_count == 0
+    } else {
+        false
+    }
+}
+
+/// Extract user message text for embedding
+fn extract_user_text(body: &serde_json::Value) -> String {
+    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+        for msg in messages {
+            if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+                if let Some(s) = msg.get("content").and_then(|c| c.as_str()) {
+                    return s.to_string();
+                }
+                if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
+                    for block in arr {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                return text.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    String::new()
 }
 
 async fn health_handler(
