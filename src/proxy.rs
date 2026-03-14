@@ -264,23 +264,20 @@ async fn proxy_handler(
             "Streaming request forwarded"
         );
 
-        // Send TUI update immediately (we won't wait for stream to finish)
-        let _ = state.tui_tx.send(TuiMessage::RequestCompleted {
-            session_id: session_id.clone(),
-            update: ProxyUpdate {
-                tokens_original: tokens_before,
-                tokens_compressed: tokens_after,
-                events: pipeline_result.events,
-                tool_calls: pipeline_result.tool_calls,
-                cache_status: if should_cache {
-                    CacheStatus::Miss
-                } else {
-                    CacheStatus::Skipped
-                },
-                pipeline_duration,
-                upstream_duration: Some(upstream_duration),
+        // Build the ProxyUpdate for when the stream completes
+        let stream_update = ProxyUpdate {
+            tokens_original: tokens_before,
+            tokens_compressed: tokens_after,
+            events: pipeline_result.events,
+            tool_calls: pipeline_result.tool_calls,
+            cache_status: if should_cache {
+                CacheStatus::Miss
+            } else {
+                CacheStatus::Skipped
             },
-        });
+            pipeline_duration,
+            upstream_duration: Some(upstream_duration),
+        };
 
         if should_cache {
             // Tee the stream: forward chunks to client while accumulating for cache
@@ -295,10 +292,11 @@ async fn proxy_handler(
                     })
             });
 
-            // Spawn background task to cache the response after streaming completes
+            // Spawn background task to cache the response and signal stream completion
             let state_bg = state.clone();
             let user_text_bg = user_text_for_cache.clone();
             let model_id_bg = model_id.clone();
+            let session_id_bg = session_id.clone();
             tokio::spawn(async move {
                 match rx.await {
                     Ok(sse_bytes) => {
@@ -355,6 +353,11 @@ async fn proxy_handler(
                         );
                     }
                 }
+                // Signal stream completion (fires on both success and client disconnect)
+                let _ = state_bg.tui_tx.send(TuiMessage::RequestCompleted {
+                    session_id: session_id_bg,
+                    update: stream_update,
+                });
             });
 
             let body = Body::from_stream(stream);
@@ -364,7 +367,17 @@ async fn proxy_handler(
 
             return Ok(response);
         } else {
-            // Non-cacheable streaming: simple passthrough
+            // Non-cacheable streaming: passthrough with completion tracking
+            let tui_tx = state.tui_tx.clone();
+            let session_id_bg = session_id.clone();
+            let tracker = StreamTracker {
+                tui_tx,
+                message: Some(TuiMessage::RequestCompleted {
+                    session_id: session_id_bg,
+                    update: stream_update,
+                }),
+            };
+
             let stream = upstream_response.bytes_stream().map(|chunk| {
                 chunk
                     .map(|bytes| axum::body::Bytes::from(bytes))
@@ -373,7 +386,7 @@ async fn proxy_handler(
                     })
             });
 
-            let body = Body::from_stream(stream);
+            let body = Body::from_stream(TrackedStream { inner: stream, _tracker: tracker });
             let mut response = Response::new(body);
             *response.status_mut() = status;
             *response.headers_mut() = response_headers;
@@ -490,6 +503,40 @@ fn response_has_tool_use(response_body: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// Sends a TuiMessage when dropped — used to detect stream completion or client disconnect
+struct StreamTracker {
+    tui_tx: mpsc::UnboundedSender<TuiMessage>,
+    message: Option<TuiMessage>,
+}
+
+impl Drop for StreamTracker {
+    fn drop(&mut self) {
+        if let Some(msg) = self.message.take() {
+            let _ = self.tui_tx.send(msg);
+        }
+    }
+}
+
+// Wraps a stream and holds a StreamTracker that fires on drop
+pin_project_lite::pin_project! {
+    struct TrackedStream<S> {
+        #[pin]
+        inner: S,
+        _tracker: StreamTracker,
+    }
+}
+
+impl<S: futures_util::Stream> futures_util::Stream for TrackedStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
+    }
 }
 
 async fn health_handler(

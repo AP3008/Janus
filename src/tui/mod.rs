@@ -18,7 +18,11 @@ use crate::metrics::{
 use sparkline::TokenHistory;
 
 /// Seconds of inactivity before a session is considered idle
-const SESSION_IDLE_SECS: u64 = 300;
+const SESSION_IDLE_SECS: u64 = 45;
+/// Seconds of inactivity before a session is considered ended
+const SESSION_ENDED_SECS: u64 = 120;
+/// Seconds after "ended" before auto-removing from display
+const SESSION_CLEANUP_SECS: u64 = 600;
 
 /// Update payload sent from the proxy on request completion
 #[derive(Debug, Clone)]
@@ -78,6 +82,11 @@ impl SessionInfo {
         } else {
             SessionState::Ended
         }
+    }
+
+    pub fn should_cleanup(&self) -> bool {
+        self.in_flight == 0
+            && self.last_activity.elapsed().as_secs() >= SESSION_ENDED_SECS + SESSION_CLEANUP_SECS
     }
 
     pub fn age_str(&self) -> String {
@@ -285,6 +294,11 @@ pub fn run_tui(
         // Check for proxy updates (non-blocking)
         while let Ok(msg) = rx.try_recv() {
             app.on_tui_message(msg);
+        }
+
+        // Auto-cleanup old ended sessions (every ~5 seconds = 50 ticks)
+        if app.tick_count % 50 == 0 {
+            app.sessions.retain(|_, info| !info.should_cleanup());
         }
     }
 
