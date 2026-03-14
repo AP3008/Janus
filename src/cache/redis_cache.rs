@@ -63,7 +63,7 @@ impl RedisSemanticCache {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
 
         // Check if index exists
-        let exists: Result<String, _> = redis::cmd("FT.INFO")
+        let exists: Result<redis::Value, _> = redis::cmd("FT.INFO")
             .arg(&index_name)
             .query_async(&mut conn)
             .await;
@@ -106,7 +106,7 @@ impl RedisSemanticCache {
             Err(e) => {
                 // Index might already exist from concurrent creation
                 let msg = e.to_string();
-                if msg.contains("Index already exists") {
+                if msg.contains("already exists") {
                     Ok(())
                 } else if msg.contains("unknown command") || msg.contains("ERR unknown") {
                     Err(anyhow::anyhow!(
