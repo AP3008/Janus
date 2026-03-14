@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
             let tok = tokenizer::Tokenizer::new();
 
-            let instance_store = session::InstanceStore::new();
+            let tool_dedup = Arc::new(session::SessionData::new());
 
             // Initialize semantic cache (graceful degradation if Redis unavailable)
             let (cache_box, embedder): (
@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 start_time: Instant::now(),
                 tokenizer: tok,
                 tui_tx: tui_tx.clone(),
-                instance_store,
+                tool_dedup,
                 cache: cache_box,
                 embedder,
             });
@@ -397,15 +397,9 @@ async fn run_benchmark() -> anyhow::Result<()> {
 
         let orig_tokens = tokenizer.count_message_tokens(&body);
 
-        // For agentic fixture, create a session store to test dedup
-        let session_store = session::SessionStore::new();
+        // For agentic fixture, create session data to test dedup
         let session_data = if *fixture_name == "agentic_5turn" {
-            if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
-                let sid = session::SessionStore::derive_session_id(messages);
-                Some(session_store.get_or_create(&sid))
-            } else {
-                None
-            }
+            Some(Arc::new(session::SessionData::new()))
         } else {
             None
         };

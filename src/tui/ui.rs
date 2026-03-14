@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Bar, BarChart, BarGroup, Block, Borders, Gauge, Paragraph, Sparkline, Wrap},
 };
 
-use super::{TuiApp, SessionState};
+use super::TuiApp;
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -160,9 +160,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let status_color = if app.paused { Color::Yellow } else { Color::Green };
     let status_icon = if app.paused { "⏸" } else { "●" };
 
-    // Build session indicator spans
-    let (active, idle, _ended) = app.session_counts();
-    let num_instances = app.instance_count();
     let mut header_spans = vec![
         Span::styled(
             " JANUS ",
@@ -181,41 +178,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &TuiApp) {
         ),
     ];
 
-    if num_instances > 0 {
+    if app.in_flight > 0 {
         header_spans.push(Span::styled("  │ ", Style::default().fg(Color::DarkGray)));
         header_spans.push(Span::styled(
-            format!(
-                "{} instance{}",
-                num_instances,
-                if num_instances != 1 { "s" } else { "" }
-            ),
-            Style::default().fg(Color::Cyan),
+            format!("{} in-flight", app.in_flight),
+            Style::default().fg(Color::Green),
         ));
-    }
-
-    if active > 0 || idle > 0 {
-        header_spans.push(Span::styled("  │ ", Style::default().fg(Color::DarkGray)));
-        if active > 0 {
-            header_spans.push(Span::styled(
-                format!("● {} active", active),
-                Style::default().fg(Color::Green),
-            ));
-            if active > 1 {
-                header_spans.push(Span::styled(
-                    " [parallel]",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-        }
-        if active > 0 && idle > 0 {
-            header_spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
-        }
-        if idle > 0 {
-            header_spans.push(Span::styled(
-                format!("○ {} idle", idle),
-                Style::default().fg(Color::Yellow),
-            ));
-        }
     }
 
     let lines = vec![
@@ -486,7 +454,7 @@ fn draw_right_panel(frame: &mut Frame, area: Rect, app: &TuiApp) {
 fn draw_session_summary(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let block = Block::default()
         .title(Span::styled(
-            " Session ",
+            " Stats ",
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -504,8 +472,6 @@ fn draw_session_summary(frame: &mut Frame, area: Rect, app: &TuiApp) {
             Constraint::Length(1), // spacer
             Constraint::Length(1), // cache gauge label
             Constraint::Length(1), // cache gauge
-            Constraint::Length(1), // spacer
-            Constraint::Min(3),   // session list
         ])
         .split(inner);
 
@@ -555,67 +521,6 @@ fn draw_session_summary(frame: &mut Frame, area: Rect, app: &TuiApp) {
         .ratio(cache_ratio.min(1.0))
         .label(format!("{:.0}%", cache_ratio * 100.0));
     frame.render_widget(cache_gauge, chunks[3]);
-
-    // Session list
-    draw_session_list(frame, chunks[5], app);
-}
-
-fn draw_session_list(frame: &mut Frame, area: Rect, app: &TuiApp) {
-    let sorted = app.sorted_sessions();
-
-    if sorted.is_empty() {
-        return;
-    }
-
-    let mut lines = vec![Line::from(Span::styled(
-        "  Sessions",
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    ))];
-
-    for (inst_id, sess_id, info) in &sorted {
-        let state = info.state();
-        let (icon, color) = match state {
-            SessionState::Active => ("●", Color::Green),
-            SessionState::Idle => ("○", Color::Yellow),
-            SessionState::Ended => ("○", Color::DarkGray),
-        };
-
-        // Show truncated instance and session IDs
-        let inst_short = if inst_id.len() > 9 { &inst_id[5..9] } else { inst_id.as_str() };
-        let sess_short = if sess_id.len() > 6 { &sess_id[..6] } else { sess_id.as_str() };
-        let status_text = if info.in_flight > 0 {
-            format!("{} in-flight", info.in_flight)
-        } else {
-            match state {
-                SessionState::Active => "active".to_string(),
-                SessionState::Idle => "idle".to_string(),
-                SessionState::Ended => "ended".to_string(),
-            }
-        };
-
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(icon, Style::default().fg(color)),
-            Span::raw(" "),
-            Span::styled(inst_short, Style::default().fg(Color::Cyan)),
-            Span::styled(":", Style::default().fg(Color::DarkGray)),
-            Span::styled(sess_short, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(status_text, Style::default().fg(color)),
-            Span::styled(
-                format!("  {} req", info.total_requests),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!("  {}", info.age_str()),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-
-    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_tool_calls(frame: &mut Frame, area: Rect, app: &TuiApp) {
