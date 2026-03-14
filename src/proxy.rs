@@ -64,30 +64,27 @@ async fn proxy_handler(
 
     let tokens_before = state.tokenizer.count_message_tokens(&body_json);
 
-    // Check if request is stateless (cacheable): exactly 1 user message, 0 assistant messages
-    let is_stateless = is_stateless_request(&body_json);
-
     // Check if this is a streaming request (needed for cache hit response format)
     let is_streaming = body_json
         .get("stream")
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
-    // Extract user text BEFORE pipeline compression for consistent cache embeddings
-    let user_text_for_cache = if is_stateless && state.config.cache.enabled {
+    // Extract last user message text BEFORE pipeline compression for consistent cache embeddings
+    let user_text_for_cache = if state.config.cache.enabled {
         extract_user_text(&body_json)
     } else {
         String::new()
     };
 
-    // Try semantic cache for stateless requests
+    // Try semantic cache lookup
     let model_id = body_json
         .get("model")
         .and_then(|m| m.as_str())
         .unwrap_or("unknown")
         .to_string();
 
-    if is_stateless && state.config.cache.enabled {
+    if state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
             if !user_text_for_cache.is_empty() {
                 match embedder.embed_one(&user_text_for_cache).await {
@@ -245,8 +242,7 @@ async fn proxy_handler(
 
     // For streaming requests, pipe the response body through directly
     if is_streaming {
-        let should_cache = is_stateless
-            && status == StatusCode::OK
+        let should_cache = status == StatusCode::OK
             && state.config.cache.enabled
             && state.cache.is_some()
             && state.embedder.is_some();
@@ -378,8 +374,8 @@ async fn proxy_handler(
         StatusCode::BAD_GATEWAY
     })?;
 
-    // Store in cache if stateless and successful
-    let cache_status = if is_stateless && status == StatusCode::OK && state.config.cache.enabled {
+    // Store in cache if successful
+    let cache_status = if status == StatusCode::OK && state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
             if !user_text_for_cache.is_empty() {
                 match embedder.embed_one(&user_text_for_cache).await {
@@ -439,28 +435,10 @@ async fn proxy_handler(
     Ok(response)
 }
 
-/// Check if request is stateless (exactly 1 user message, 0 assistant messages)
-fn is_stateless_request(body: &serde_json::Value) -> bool {
-    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
-        let mut user_count = 0;
-        let mut assistant_count = 0;
-        for msg in messages {
-            match msg.get("role").and_then(|r| r.as_str()) {
-                Some("user") => user_count += 1,
-                Some("assistant") => assistant_count += 1,
-                _ => {}
-            }
-        }
-        user_count == 1 && assistant_count == 0
-    } else {
-        false
-    }
-}
-
-/// Extract user message text for embedding
+/// Extract the LAST user message text for embedding (most recent question)
 fn extract_user_text(body: &serde_json::Value) -> String {
     if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages {
+        for msg in messages.iter().rev() {
             if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
                 if let Some(s) = msg.get("content").and_then(|c| c.as_str()) {
                     return s.to_string();
