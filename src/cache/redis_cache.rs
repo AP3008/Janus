@@ -250,6 +250,12 @@ impl SemanticCache for RedisSemanticCache {
     ) -> anyhow::Result<()> {
         self.ensure_index(model).await?;
 
+        // Skip if a near-duplicate entry already exists (prevents HNSW index pollution)
+        if let Ok(Some(_)) = self.get(embedding, 0.95, model).await {
+            tracing::debug!("Skipping cache put: near-duplicate already exists");
+            return Ok(());
+        }
+
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let key = format!("{}{}", Self::model_key_prefix(model), Uuid::new_v4());
         let blob = Self::embedding_to_bytes(embedding);

@@ -114,6 +114,17 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 {
                     Ok(redis_cache) => {
+                        // Flush stale cache from previous sessions
+                        use cache::SemanticCache;
+                        match redis_cache.flush().await {
+                            Ok(count) if count > 0 => {
+                                tracing::info!(count, "Flushed stale cache entries from previous session");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to flush stale cache on startup");
+                            }
+                            _ => {}
+                        }
                         match embed::Embedder::new() {
                             Ok(emb) => {
                                 tracing::info!("Semantic cache enabled with Redis");
@@ -145,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
                 embedder,
             });
 
+            let state_for_shutdown = state.clone();
             let app = proxy::create_router(state);
 
             // Spawn TUI in a separate OS thread
@@ -180,6 +192,16 @@ async fn main() -> anyhow::Result<()> {
                     }) => {
                         // TUI quit, exit gracefully
                     }
+                }
+            }
+
+            // Flush cache on shutdown for session isolation
+            if let Some(ref cache) = state_for_shutdown.cache {
+                match cache.flush().await {
+                    Ok(count) if count > 0 => {
+                        eprintln!("Flushed {} cache entries on shutdown", count);
+                    }
+                    _ => {}
                 }
             }
         }
