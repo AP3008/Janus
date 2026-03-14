@@ -34,9 +34,9 @@ lazy_static! {
     static ref LINE_COMMENT_RE: Regex = Regex::new(
         r"(?m)^(\s*)//(?!/)(.*)$"
     ).unwrap();
-    // Block comments (non-JSDoc)
+    // Block comments (all /* ... */ including JSDoc — we filter JSDoc out in code)
     static ref BLOCK_COMMENT_RE: Regex = Regex::new(
-        r"/\*(?!\*)[\s\S]*?\*/"
+        r"/\*[\s\S]*?\*/"
     ).unwrap();
     // Comments to preserve
     static ref PRESERVE_COMMENT_RE: Regex = Regex::new(
@@ -189,8 +189,16 @@ fn strip_comments(content: &str, tokenizer: &Tokenizer) -> (String, Option<Compr
         result.push('\n');
     }
 
-    // Remove block comments (non-JSDoc)
-    result = BLOCK_COMMENT_RE.replace_all(&result, "").to_string();
+    // Remove block comments but keep JSDoc (/** ... */) since B1 handles those
+    result = BLOCK_COMMENT_RE.replace_all(&result, |caps: &regex::Captures| {
+        let matched = caps.get(0).unwrap().as_str();
+        if matched.starts_with("/**") {
+            // Keep JSDoc blocks — they're handled by B1
+            matched.to_string()
+        } else {
+            String::new()
+        }
+    }).to_string();
 
     // Trim trailing newline to match input
     if !content.ends_with('\n') && result.ends_with('\n') {
