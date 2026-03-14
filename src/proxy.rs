@@ -67,6 +67,19 @@ async fn proxy_handler(
     // Check if request is stateless (cacheable): exactly 1 user message, 0 assistant messages
     let is_stateless = is_stateless_request(&body_json);
 
+    // Check if this is a streaming request (needed for cache hit response format)
+    let is_streaming = body_json
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    // Extract user text BEFORE pipeline compression for consistent cache embeddings
+    let user_text_for_cache = if is_stateless && state.config.cache.enabled {
+        extract_user_text(&body_json)
+    } else {
+        String::new()
+    };
+
     // Try semantic cache for stateless requests
     let model_id = body_json
         .get("model")
@@ -76,10 +89,8 @@ async fn proxy_handler(
 
     if is_stateless && state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
-            // Extract user message text for embedding
-            let user_text = extract_user_text(&body_json);
-            if !user_text.is_empty() {
-                match embedder.embed_one(&user_text).await {
+            if !user_text_for_cache.is_empty() {
+                match embedder.embed_one(&user_text_for_cache).await {
                     Ok(embedding) => {
                         match cache
                             .get(&embedding, state.config.cache.similarity_cutoff, &model_id)
@@ -104,12 +115,26 @@ async fn proxy_handler(
                                     upstream_duration: None,
                                 });
 
-                                let mut response =
-                                    Response::new(Body::from(cached.response_body));
+                                let (body_bytes, content_type) = if is_streaming {
+                                    // Convert cached JSON to SSE for streaming clients
+                                    match stream_reassemble::json_to_sse(
+                                        &cached.response_body,
+                                    ) {
+                                        Some(sse) => (sse, "text/event-stream"),
+                                        None => {
+                                            // Fallback to JSON if conversion fails
+                                            (cached.response_body, "application/json")
+                                        }
+                                    }
+                                } else {
+                                    (cached.response_body, "application/json")
+                                };
+
+                                let mut response = Response::new(Body::from(body_bytes));
                                 *response.status_mut() = StatusCode::OK;
                                 response.headers_mut().insert(
                                     "content-type",
-                                    "application/json".parse().unwrap(),
+                                    content_type.parse().unwrap(),
                                 );
                                 response.headers_mut().insert(
                                     "x-janus-cache",
@@ -197,12 +222,6 @@ async fn proxy_handler(
         }
     }
 
-    // Check if this is a streaming request
-    let is_streaming = body_json
-        .get("stream")
-        .and_then(|s| s.as_bool())
-        .unwrap_or(false);
-
     // Forward the compressed body
     let upstream_start = Instant::now();
     let upstream_response = req
@@ -270,7 +289,7 @@ async fn proxy_handler(
 
             // Spawn background task to cache the response after streaming completes
             let state_bg = state.clone();
-            let body_json_bg = body_json.clone();
+            let user_text_bg = user_text_for_cache.clone();
             let model_id_bg = model_id.clone();
             tokio::spawn(async move {
                 match rx.await {
@@ -282,9 +301,8 @@ async fn proxy_handler(
                             if let (Some(cache), Some(embedder)) =
                                 (&state_bg.cache, &state_bg.embedder)
                             {
-                                let user_text = extract_user_text(&body_json_bg);
-                                if !user_text.is_empty() {
-                                    match embedder.embed_one(&user_text).await {
+                                if !user_text_bg.is_empty() {
+                                    match embedder.embed_one(&user_text_bg).await {
                                         Ok(embedding) => {
                                             if let Err(e) = cache
                                                 .put(
@@ -363,9 +381,8 @@ async fn proxy_handler(
     // Store in cache if stateless and successful
     let cache_status = if is_stateless && status == StatusCode::OK && state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
-            let user_text = extract_user_text(&body_json);
-            if !user_text.is_empty() {
-                match embedder.embed_one(&user_text).await {
+            if !user_text_for_cache.is_empty() {
+                match embedder.embed_one(&user_text_for_cache).await {
                     Ok(embedding) => {
                         if let Err(e) = cache
                             .put(

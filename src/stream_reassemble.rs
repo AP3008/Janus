@@ -233,6 +233,156 @@ pub fn reconstruct_response(sse_data: &str) -> Option<Vec<u8>> {
     serde_json::to_vec(&message).ok()
 }
 
+/// Convert a non-streaming Messages API JSON response into SSE format.
+/// Used when returning a cached response to a client that requested `stream: true`.
+pub fn json_to_sse(response_json: &[u8]) -> Option<Vec<u8>> {
+    let msg: serde_json::Value = serde_json::from_slice(response_json).ok()?;
+    let mut out = Vec::new();
+
+    // Build message_start: the message object with empty content and no stop_reason yet
+    let mut start_msg = msg.clone();
+    start_msg["content"] = serde_json::json!([]);
+    start_msg["stop_reason"] = serde_json::Value::Null;
+    start_msg["stop_sequence"] = serde_json::Value::Null;
+    // Strip output_tokens from usage in message_start (it starts at 0)
+    if let Some(usage) = start_msg.get_mut("usage") {
+        if let Some(obj) = usage.as_object_mut() {
+            obj.remove("output_tokens");
+        }
+    }
+
+    write_sse_event(
+        &mut out,
+        "message_start",
+        &serde_json::json!({"type": "message_start", "message": start_msg}),
+    );
+
+    // Emit content blocks
+    let content = msg.get("content").and_then(|c| c.as_array());
+    if let Some(blocks) = content {
+        for (index, block) in blocks.iter().enumerate() {
+            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+
+            // content_block_start
+            let start_block = match block_type {
+                "text" => serde_json::json!({"type": "text", "text": ""}),
+                "tool_use" => {
+                    serde_json::json!({
+                        "type": "tool_use",
+                        "id": block.get("id").cloned().unwrap_or(serde_json::json!("")),
+                        "name": block.get("name").cloned().unwrap_or(serde_json::json!("")),
+                        "input": {}
+                    })
+                }
+                _ => block.clone(),
+            };
+            write_sse_event(
+                &mut out,
+                "content_block_start",
+                &serde_json::json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": start_block
+                }),
+            );
+
+            // content_block_delta
+            match block_type {
+                "text" => {
+                    let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if !text.is_empty() {
+                        write_sse_event(
+                            &mut out,
+                            "content_block_delta",
+                            &serde_json::json!({
+                                "type": "content_block_delta",
+                                "index": index,
+                                "delta": {"type": "text_delta", "text": text}
+                            }),
+                        );
+                    }
+                }
+                "tool_use" => {
+                    if let Some(input) = block.get("input") {
+                        let json_str = serde_json::to_string(input).unwrap_or_default();
+                        if !json_str.is_empty() {
+                            write_sse_event(
+                                &mut out,
+                                "content_block_delta",
+                                &serde_json::json!({
+                                    "type": "content_block_delta",
+                                    "index": index,
+                                    "delta": {"type": "input_json_delta", "partial_json": json_str}
+                                }),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // content_block_stop
+            write_sse_event(
+                &mut out,
+                "content_block_stop",
+                &serde_json::json!({"type": "content_block_stop", "index": index}),
+            );
+        }
+    }
+
+    // message_delta
+    let mut delta = serde_json::Map::new();
+    delta.insert("type".to_string(), serde_json::json!("message_delta"));
+
+    let mut delta_inner = serde_json::Map::new();
+    delta_inner.insert(
+        "stop_reason".to_string(),
+        msg.get("stop_reason")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    delta_inner.insert(
+        "stop_sequence".to_string(),
+        msg.get("stop_sequence")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    delta.insert("delta".to_string(), serde_json::Value::Object(delta_inner));
+
+    // Include output_tokens in usage
+    if let Some(usage) = msg.get("usage") {
+        if let Some(output_tokens) = usage.get("output_tokens") {
+            delta.insert(
+                "usage".to_string(),
+                serde_json::json!({"output_tokens": output_tokens}),
+            );
+        }
+    }
+
+    write_sse_event(
+        &mut out,
+        "message_delta",
+        &serde_json::Value::Object(delta),
+    );
+
+    // message_stop
+    write_sse_event(
+        &mut out,
+        "message_stop",
+        &serde_json::json!({"type": "message_stop"}),
+    );
+
+    Some(out)
+}
+
+fn write_sse_event(out: &mut Vec<u8>, event_type: &str, data: &serde_json::Value) {
+    use std::fmt::Write;
+    let json = serde_json::to_string(data).unwrap_or_default();
+    let mut s = String::new();
+    let _ = write!(s, "event: {}\ndata: {}\n\n", event_type, json);
+    out.extend_from_slice(s.as_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +435,45 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
 
         let result = reconstruct_response(sse);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_json_to_sse_roundtrip() {
+        // Create a non-streaming JSON response
+        let json = serde_json::json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Ottawa is the capital of Canada."}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 25, "output_tokens": 12}
+        });
+        let json_bytes = serde_json::to_vec(&json).unwrap();
+
+        // Convert to SSE
+        let sse_bytes = json_to_sse(&json_bytes).unwrap();
+        let sse_str = String::from_utf8(sse_bytes.clone()).unwrap();
+
+        // Verify SSE format
+        assert!(sse_str.contains("event: message_start\n"));
+        assert!(sse_str.contains("event: content_block_start\n"));
+        assert!(sse_str.contains("event: content_block_delta\n"));
+        assert!(sse_str.contains("event: content_block_stop\n"));
+        assert!(sse_str.contains("event: message_delta\n"));
+        assert!(sse_str.contains("event: message_stop\n"));
+        assert!(sse_str.contains("Ottawa is the capital of Canada."));
+
+        // Round-trip: SSE -> JSON should reconstruct the same content
+        let reconstructed = reconstruct_response(&sse_str).unwrap();
+        let reconstructed_json: serde_json::Value =
+            serde_json::from_slice(&reconstructed).unwrap();
+        assert_eq!(
+            reconstructed_json["content"][0]["text"],
+            "Ottawa is the capital of Canada."
+        );
+        assert_eq!(reconstructed_json["stop_reason"], "end_turn");
     }
 
     #[test]
