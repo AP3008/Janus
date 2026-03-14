@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use crate::config::JanusConfig;
 use crate::metrics::CacheStatus;
+use crate::session::{SessionStore, self};
 use crate::tokenizer::Tokenizer;
 use crate::tui::ProxyUpdate;
 use tokio::sync::mpsc;
@@ -22,6 +23,7 @@ pub struct AppState {
     pub start_time: Instant,
     pub tokenizer: Tokenizer,
     pub tui_tx: mpsc::UnboundedSender<ProxyUpdate>,
+    pub session_store: SessionStore,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -56,12 +58,21 @@ async fn proxy_handler(
 
     let tokens_before = state.tokenizer.count_message_tokens(&body_json);
 
+    // Derive session ID for dedup
+    let session_id = if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
+        session::SessionStore::derive_session_id(messages)
+    } else {
+        "default".to_string()
+    };
+    let session_data = state.session_store.get_or_create(&session_id);
+
     // Run compression pipeline
     let pipeline_start = Instant::now();
-    let events = crate::pipeline::process(
+    let pipeline_result = crate::pipeline::process(
         &mut body_json,
         &state.tokenizer,
         &state.config.pipeline,
+        Some(&session_data),
     );
     let pipeline_duration = pipeline_start.elapsed();
 
@@ -73,11 +84,12 @@ async fn proxy_handler(
         tokens_after = tokens_after,
         tokens_saved = tokens_saved,
         pipeline_ms = pipeline_duration.as_millis() as u64,
-        stages = events.len(),
+        stages = pipeline_result.events.len(),
+        session = %session_id,
         "Compression complete"
     );
 
-    for event in &events {
+    for event in &pipeline_result.events {
         tracing::debug!(
             stage = %event.stage_name,
             saved = event.tokens_saved(),
@@ -140,8 +152,8 @@ async fn proxy_handler(
     let _ = state.tui_tx.send(ProxyUpdate {
         tokens_original: tokens_before,
         tokens_compressed: tokens_after,
-        events: events.clone(),
-        tool_calls: vec![],
+        events: pipeline_result.events,
+        tool_calls: pipeline_result.tool_calls,
         cache_status: CacheStatus::Skipped,
         pipeline_duration,
         upstream_duration: Some(upstream_duration),

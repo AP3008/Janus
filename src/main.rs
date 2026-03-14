@@ -2,6 +2,7 @@ mod config;
 mod metrics;
 mod pipeline;
 mod proxy;
+mod session;
 mod tokenizer;
 mod tui;
 
@@ -70,12 +71,15 @@ async fn main() -> anyhow::Result<()> {
 
             let tok = tokenizer::Tokenizer::new();
 
+            let session_store = session::SessionStore::new();
+
             let state = Arc::new(proxy::AppState {
                 config: janus_config,
                 client: reqwest::Client::new(),
                 start_time: Instant::now(),
                 tokenizer: tok,
                 tui_tx: tui_tx.clone(),
+                session_store,
             });
 
             let app = proxy::create_router(state);

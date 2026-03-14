@@ -3,8 +3,11 @@ pub mod dedup;
 pub mod regex_compress;
 pub mod semantic_trim;
 
+use std::sync::Arc;
+
 use crate::config::PipelineConfig;
-use crate::metrics::CompressionEvent;
+use crate::metrics::{CompressionEvent, ToolCallInfo};
+use crate::session::SessionData;
 use crate::tokenizer::Tokenizer;
 
 /// Extract the user's latest query text from the messages array
@@ -134,18 +137,29 @@ fn write_text_back(body: &mut serde_json::Value, path: &[usize], text: &str) {
     }
 }
 
+/// Result of running the pipeline
+pub struct PipelineResult {
+    pub events: Vec<CompressionEvent>,
+    pub tool_calls: Vec<ToolCallInfo>,
+}
+
 /// Run the full compression pipeline on a request body
 pub fn process(
     body: &mut serde_json::Value,
     tokenizer: &Tokenizer,
     config: &PipelineConfig,
-) -> Vec<CompressionEvent> {
+    session: Option<&Arc<SessionData>>,
+) -> PipelineResult {
     let mut all_events = Vec::new();
+    let mut all_tool_calls = Vec::new();
 
     // Stage A: Tool-result deduplication
     if config.tool_dedup {
-        let events = dedup::dedup(body, tokenizer);
-        all_events.extend(events);
+        if let Some(session) = session {
+            let (events, tool_calls) = dedup::dedup(body, session, tokenizer);
+            all_events.extend(events);
+            all_tool_calls.extend(tool_calls);
+        }
     }
 
     // Extract compressible text segments
@@ -182,5 +196,8 @@ pub fn process(
         write_text_back(body, &path, &current_text);
     }
 
-    all_events
+    PipelineResult {
+        events: all_events,
+        tool_calls: all_tool_calls,
+    }
 }
