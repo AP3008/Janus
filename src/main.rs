@@ -489,6 +489,13 @@ async fn run_benchmark() -> anyhow::Result<()> {
             "-".to_string()
         };
 
+        // Cache hit = entire request skipped upstream, all tokens saved
+        let (saved, comp_tokens, pct, stage_str) = if *fixture_name == "cache_repeat" && cache_col.starts_with("HIT") {
+            (orig_tokens, 0usize, 100.0, "cache".to_string())
+        } else {
+            (saved, comp_tokens, pct, stage_str)
+        };
+
         total_orig += orig_tokens;
         total_comp += comp_tokens;
 
