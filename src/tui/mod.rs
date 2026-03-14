@@ -39,11 +39,13 @@ pub struct TuiApp {
     pub last_request: Option<ProxyUpdate>,
     pub stage_breakdown: Vec<(String, usize)>,
     pub upstream_url: String,
+    pub listen_addr: String,
     pub input_cost_per_1k: f64,
+    pub tick_count: u64,
 }
 
 impl TuiApp {
-    pub fn new(upstream_url: String, input_cost_per_1k: f64) -> Self {
+    pub fn new(upstream_url: String, listen_addr: String, input_cost_per_1k: f64) -> Self {
         Self {
             should_quit: false,
             paused: false,
@@ -54,7 +56,9 @@ impl TuiApp {
             last_request: None,
             stage_breakdown: Vec::new(),
             upstream_url,
+            listen_addr,
             input_cost_per_1k,
+            tick_count: 0,
         }
     }
 
@@ -141,6 +145,7 @@ impl TuiApp {
 pub fn run_tui(
     mut rx: mpsc::UnboundedReceiver<ProxyUpdate>,
     upstream_url: String,
+    listen_addr: String,
     input_cost_per_1k: f64,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -149,7 +154,7 @@ pub fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = TuiApp::new(upstream_url, input_cost_per_1k);
+    let mut app = TuiApp::new(upstream_url, listen_addr, input_cost_per_1k);
 
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -161,6 +166,7 @@ pub fn run_tui(
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
+        app.tick_count = app.tick_count.wrapping_add(1);
 
         // Poll for keyboard events with 100ms timeout
         if event::poll(Duration::from_millis(100))? {

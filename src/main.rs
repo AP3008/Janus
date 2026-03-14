@@ -162,8 +162,9 @@ async fn main() -> anyhow::Result<()> {
             // Spawn TUI in a separate OS thread
             let tui_handle = if !no_tui {
                 let upstream = upstream_url.clone();
+                let listen = listen_addr.clone();
                 Some(std::thread::spawn(move || {
-                    if let Err(e) = tui::run_tui(tui_rx, upstream, input_cost) {
+                    if let Err(e) = tui::run_tui(tui_rx, upstream, listen, input_cost) {
                         eprintln!("TUI error: {}", e);
                     }
                 }))
