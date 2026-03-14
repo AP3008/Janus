@@ -44,19 +44,49 @@ async fn proxy_handler(
 ) -> Result<Response, StatusCode> {
     let upstream_url = format!("{}/v1/messages", state.config.server.upstream_url);
 
-    // Parse body for token counting
-    let body_json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+    // Parse body for token counting and compression
+    let mut body_json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
         tracing::error!(error = %e, "Failed to parse request body as JSON");
         StatusCode::BAD_REQUEST
     })?;
 
     let tokens_before = state.tokenizer.count_message_tokens(&body_json);
 
-    tracing::info!(
-        tokens = tokens_before,
-        upstream = %upstream_url,
-        "Proxying request"
+    // Run compression pipeline
+    let pipeline_start = Instant::now();
+    let events = crate::pipeline::process(
+        &mut body_json,
+        &state.tokenizer,
+        &state.config.pipeline,
     );
+    let pipeline_duration = pipeline_start.elapsed();
+
+    let tokens_after = state.tokenizer.count_message_tokens(&body_json);
+    let tokens_saved = tokens_before.saturating_sub(tokens_after);
+
+    tracing::info!(
+        tokens_before = tokens_before,
+        tokens_after = tokens_after,
+        tokens_saved = tokens_saved,
+        pipeline_ms = pipeline_duration.as_millis() as u64,
+        stages = events.len(),
+        "Compression complete"
+    );
+
+    for event in &events {
+        tracing::debug!(
+            stage = %event.stage_name,
+            saved = event.tokens_saved(),
+            reason = %event.reason,
+            "Stage result"
+        );
+    }
+
+    // Serialize compressed body
+    let compressed_body = serde_json::to_vec(&body_json).map_err(|e| {
+        tracing::error!(error = %e, "Failed to serialize compressed body");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Build upstream request with forwarded headers
     let mut req = state.client.post(&upstream_url);
@@ -68,10 +98,10 @@ async fn proxy_handler(
         }
     }
 
-    // Forward the body (using original bytes for now, compression comes later)
+    // Forward the compressed body
     let upstream_start = Instant::now();
     let upstream_response = req
-        .body(body.to_vec())
+        .body(compressed_body)
         .send()
         .await
         .map_err(|e| {
@@ -80,7 +110,7 @@ async fn proxy_handler(
         })?;
     let upstream_duration = upstream_start.elapsed();
 
-    // Build response with upstream status and headers
+    // Build response
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -96,6 +126,7 @@ async fn proxy_handler(
 
     tracing::info!(
         tokens_in = tokens_before,
+        tokens_out = tokens_after,
         upstream_ms = upstream_duration.as_millis() as u64,
         response_status = status.as_u16(),
         "Request completed"

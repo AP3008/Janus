@@ -128,7 +128,7 @@ fn remove_docstrings(content: &str, tokenizer: &Tokenizer) -> (String, Option<Co
 
     let tokens_after = tokenizer.count_tokens(&result);
 
-    if tokens_before > tokens_after {
+    let event = if tokens_before > tokens_after {
         Some(CompressionEvent {
             tokens_before,
             tokens_after,
@@ -138,9 +138,9 @@ fn remove_docstrings(content: &str, tokenizer: &Tokenizer) -> (String, Option<Co
         })
     } else {
         None
-    }
-    .map(|e| (result, Some(e)))
-    .unwrap_or_else(|| (result, None))
+    };
+
+    (result, event)
 }
 
 /// B2: Strip inline comments (preserving shebangs, type: ignore, etc.)
