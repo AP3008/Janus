@@ -44,8 +44,8 @@ impl RedisSemanticCache {
             return Err(anyhow::anyhow!(
                 "Redis at {} does not have the RediSearch module. \
                  Janus requires redis-stack (not vanilla Redis). \
-                 Install via: brew install redis-stack-server, \
-                 or use docker: redis/redis-stack:latest"
+                 Install via: brew tap redis-stack/redis-stack && brew install redis-stack-server, \
+                 or use docker: docker compose up -d redis"
             , redis_url));
         }
 
@@ -111,8 +111,9 @@ impl RedisSemanticCache {
                 } else if msg.contains("unknown command") || msg.contains("ERR unknown") {
                     Err(anyhow::anyhow!(
                         "RediSearch module not available. Install redis-stack-server \
-                         (not vanilla Redis): brew install redis-stack-server, \
-                         or use docker: redis/redis-stack:latest. Error: {}", e
+                         (not vanilla Redis): brew tap redis-stack/redis-stack && \
+                         brew install redis-stack-server, \
+                         or use docker: docker compose up -d redis. Error: {}", e
                     ))
                 } else {
                     Err(anyhow::anyhow!("Failed to create vector index '{}': {}", index_name, e))
