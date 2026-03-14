@@ -11,13 +11,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::config::JanusConfig;
+use crate::metrics::CacheStatus;
 use crate::tokenizer::Tokenizer;
+use crate::tui::ProxyUpdate;
+use tokio::sync::mpsc;
 
 pub struct AppState {
     pub config: JanusConfig,
     pub client: Client,
     pub start_time: Instant,
     pub tokenizer: Tokenizer,
+    pub tui_tx: mpsc::UnboundedSender<ProxyUpdate>,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -131,6 +135,17 @@ async fn proxy_handler(
         response_status = status.as_u16(),
         "Request completed"
     );
+
+    // Send update to TUI
+    let _ = state.tui_tx.send(ProxyUpdate {
+        tokens_original: tokens_before,
+        tokens_compressed: tokens_after,
+        events: events.clone(),
+        tool_calls: vec![],
+        cache_status: CacheStatus::Skipped,
+        pipeline_duration,
+        upstream_duration: Some(upstream_duration),
+    });
 
     let mut response = Response::new(Body::from(response_bytes));
     *response.status_mut() = status;
