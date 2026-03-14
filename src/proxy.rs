@@ -18,7 +18,7 @@ use crate::metrics::CacheStatus;
 use crate::session::{SessionStore, self};
 use crate::stream_reassemble::{self, StreamTee};
 use crate::tokenizer::Tokenizer;
-use crate::tui::{ProxyUpdate, TuiMessage};
+use crate::tui::ProxyUpdate;
 use tokio::sync::mpsc;
 
 pub struct AppState {
@@ -26,7 +26,7 @@ pub struct AppState {
     pub client: Client,
     pub start_time: Instant,
     pub tokenizer: Tokenizer,
-    pub tui_tx: mpsc::UnboundedSender<TuiMessage>,
+    pub tui_tx: mpsc::UnboundedSender<ProxyUpdate>,
     pub session_store: SessionStore,
     pub cache: Option<Box<dyn SemanticCache>>,
     pub embedder: Option<Embedder>,
@@ -84,13 +84,6 @@ async fn proxy_handler(
         .unwrap_or("unknown")
         .to_string();
 
-    // Derive session ID early (before cache lookup) for session tracking
-    let session_id = if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
-        session::SessionStore::derive_session_id(messages)
-    } else {
-        "default".to_string()
-    };
-
     if state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
             if !user_text_for_cache.is_empty() {
@@ -107,19 +100,16 @@ async fn proxy_handler(
                                     "Cache HIT"
                                 );
 
-                                let _ = state.tui_tx.send(TuiMessage::RequestCompleted {
-                                    session_id: session_id.clone(),
-                                    update: ProxyUpdate {
-                                        tokens_original: tokens_before,
-                                        tokens_compressed: 0,
-                                        events: Vec::new(),
-                                        tool_calls: Vec::new(),
-                                        cache_status: CacheStatus::Hit {
-                                            similarity: cached.similarity,
-                                        },
-                                        pipeline_duration: std::time::Duration::ZERO,
-                                        upstream_duration: None,
+                                let _ = state.tui_tx.send(ProxyUpdate {
+                                    tokens_original: tokens_before,
+                                    tokens_compressed: 0,
+                                    events: Vec::new(),
+                                    tool_calls: Vec::new(),
+                                    cache_status: CacheStatus::Hit {
+                                        similarity: cached.similarity,
                                     },
+                                    pipeline_duration: std::time::Duration::ZERO,
+                                    upstream_duration: None,
                                 });
 
                                 let (body_bytes, content_type) = if is_streaming {
@@ -165,12 +155,13 @@ async fn proxy_handler(
         }
     }
 
+    // Derive session ID for dedup
+    let session_id = if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
+        session::SessionStore::derive_session_id(messages)
+    } else {
+        "default".to_string()
+    };
     let session_data = state.session_store.get_or_create(&session_id);
-
-    // Signal request started for session tracking
-    let _ = state.tui_tx.send(TuiMessage::RequestStarted {
-        session_id: session_id.clone(),
-    });
 
     // Run compression pipeline (with panic recovery to avoid crashing the proxy)
     let pipeline_start = Instant::now();
@@ -265,21 +256,18 @@ async fn proxy_handler(
         );
 
         // Send TUI update immediately (we won't wait for stream to finish)
-        let _ = state.tui_tx.send(TuiMessage::RequestCompleted {
-            session_id: session_id.clone(),
-            update: ProxyUpdate {
-                tokens_original: tokens_before,
-                tokens_compressed: tokens_after,
-                events: pipeline_result.events,
-                tool_calls: pipeline_result.tool_calls,
-                cache_status: if should_cache {
-                    CacheStatus::Miss
-                } else {
-                    CacheStatus::Skipped
-                },
-                pipeline_duration,
-                upstream_duration: Some(upstream_duration),
+        let _ = state.tui_tx.send(ProxyUpdate {
+            tokens_original: tokens_before,
+            tokens_compressed: tokens_after,
+            events: pipeline_result.events,
+            tool_calls: pipeline_result.tool_calls,
+            cache_status: if should_cache {
+                CacheStatus::Miss
+            } else {
+                CacheStatus::Skipped
             },
+            pipeline_duration,
+            upstream_duration: Some(upstream_duration),
         });
 
         if should_cache {
@@ -432,17 +420,14 @@ async fn proxy_handler(
     );
 
     // Send update to TUI
-    let _ = state.tui_tx.send(TuiMessage::RequestCompleted {
-        session_id,
-        update: ProxyUpdate {
-            tokens_original: tokens_before,
-            tokens_compressed: tokens_after,
-            events: pipeline_result.events,
-            tool_calls: pipeline_result.tool_calls,
-            cache_status,
-            pipeline_duration,
-            upstream_duration: Some(upstream_duration),
-        },
+    let _ = state.tui_tx.send(ProxyUpdate {
+        tokens_original: tokens_before,
+        tokens_compressed: tokens_after,
+        events: pipeline_result.events,
+        tool_calls: pipeline_result.tool_calls,
+        cache_status,
+        pipeline_duration,
+        upstream_duration: Some(upstream_duration),
     });
 
     let mut response = Response::new(Body::from(response_bytes));
