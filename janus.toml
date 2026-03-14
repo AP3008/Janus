@@ -13,7 +13,7 @@ min_lines_for_ast = 30
 [cache]
 enabled = true
 redis_url = "redis://127.0.0.1:6379"
-similarity_cutoff = 0.97
+similarity_cutoff = 0.85
 ttl_seconds = 3600
 stateless_only = true
 

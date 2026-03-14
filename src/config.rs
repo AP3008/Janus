@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::path::Path;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct JanusConfig {
     #[serde(default = "default_server")]
     pub server: ServerConfig,
@@ -102,7 +102,7 @@ fn default_redis_url() -> String {
 }
 
 fn default_similarity_cutoff() -> f64 {
-    0.97
+    0.85
 }
 
 fn default_ttl() -> u64 {
@@ -149,7 +149,7 @@ impl Default for CacheConfig {
         Self {
             enabled: true,
             redis_url: default_redis_url(),
-            similarity_cutoff: 0.97,
+            similarity_cutoff: 0.85,
             ttl_seconds: 3600,
             stateless_only: true,
         }

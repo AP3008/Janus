@@ -177,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Benchmark => {
-            run_benchmark()?;
+            run_benchmark().await?;
         }
         Commands::Cache { action } => {
             tracing_subscriber::fmt()
@@ -211,7 +211,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_benchmark() -> anyhow::Result<()> {
+async fn run_benchmark() -> anyhow::Result<()> {
+    use cache::SemanticCache;
+
     let fixtures_dir = std::path::Path::new("benches/fixtures");
     if !fixtures_dir.exists() {
         anyhow::bail!("Fixtures directory not found at benches/fixtures/");
@@ -227,6 +229,27 @@ fn run_benchmark() -> anyhow::Result<()> {
         min_lines_for_ast: 30,
     };
 
+    // Initialize cache infrastructure (graceful if unavailable)
+    let janus_config = config::JanusConfig::load(std::path::Path::new("janus.toml"))
+        .unwrap_or_default();
+
+    let embedder = embed::Embedder::new().ok();
+    let redis_cache = if janus_config.cache.enabled {
+        match cache::redis_cache::RedisSemanticCache::new(&janus_config.cache.redis_url).await {
+            Ok(c) => {
+                println!("  Cache: Redis connected");
+                Some(c)
+            }
+            Err(e) => {
+                println!("  Cache: unavailable ({})", e);
+                None
+            }
+        }
+    } else {
+        println!("  Cache: disabled in config");
+        None
+    };
+
     struct BenchResult {
         name: String,
         original: usize,
@@ -234,6 +257,7 @@ fn run_benchmark() -> anyhow::Result<()> {
         saved: usize,
         percent: f64,
         top_stage: String,
+        cache_col: String,
     }
 
     let mut results: Vec<BenchResult> = Vec::new();
@@ -328,6 +352,57 @@ fn run_benchmark() -> anyhow::Result<()> {
             stages_used.into_iter().collect::<Vec<_>>().join("+")
         };
 
+        // Cache test for cache_repeat fixture
+        let cache_col = if *fixture_name == "cache_repeat" {
+            if let (Some(ref embedder), Some(ref cache)) = (&embedder, &redis_cache) {
+                let query_text = body.get("messages")
+                    .and_then(|m| m.as_array())
+                    .and_then(|msgs| msgs.first())
+                    .and_then(|msg| msg.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("unknown");
+
+                match embedder.embed_one(query_text).await {
+                    Ok(embedding) => {
+                        // Try GET first (may hit from a previous run)
+                        let t0 = Instant::now();
+                        let hit = cache.get(
+                            &embedding,
+                            janus_config.cache.similarity_cutoff,
+                            model,
+                        ).await;
+                        let get_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                        match hit {
+                            Ok(Some(_)) => {
+                                format!("HIT {:.1}ms", get_ms)
+                            }
+                            _ => {
+                                // PUT a mock response, then GET to verify
+                                let mock = b"{\"content\":[{\"text\":\"Paris is the capital.\"}]}";
+                                if let Err(e) = cache.put(&embedding, mock, model, saved, janus_config.cache.ttl_seconds).await {
+                                    format!("PUT err: {}", e)
+                                } else {
+                                    let t1 = Instant::now();
+                                    match cache.get(&embedding, janus_config.cache.similarity_cutoff, model).await {
+                                        Ok(Some(_)) => format!("HIT {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0),
+                                        Ok(None) => format!("MISS {:.1}ms", get_ms),
+                                        Err(e) => format!("ERR: {}", e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => format!("embed err: {}", e),
+                }
+            } else {
+                "N/A".to_string()
+            }
+        } else {
+            "-".to_string()
+        };
+
         total_orig += orig_tokens;
         total_comp += comp_tokens;
 
@@ -338,6 +413,7 @@ fn run_benchmark() -> anyhow::Result<()> {
             saved,
             percent: pct,
             top_stage: stage_str,
+            cache_col,
         });
     }
 
@@ -345,17 +421,17 @@ fn run_benchmark() -> anyhow::Result<()> {
     println!();
     println!("Janus Benchmark {}", "─".repeat(50));
     println!(
-        "{:<20} {:>8} {:>8} {:>8} {:>6} {:<10}",
-        "Fixture", "Orig", "Comp", "Saved", "%", "Stage"
+        "{:<20} {:>8} {:>8} {:>8} {:>6} {:<10} {:<14}",
+        "Fixture", "Orig", "Comp", "Saved", "%", "Stage", "Cache"
     );
-    println!("{}", "─".repeat(66));
+    println!("{}", "─".repeat(80));
     for r in &results {
         println!(
-            "{:<20} {:>8} {:>8} {:>8} {:>5.1}% {:<10}",
-            r.name, r.original, r.compressed, r.saved, r.percent, r.top_stage
+            "{:<20} {:>8} {:>8} {:>8} {:>5.1}% {:<10} {:<14}",
+            r.name, r.original, r.compressed, r.saved, r.percent, r.top_stage, r.cache_col
         );
     }
-    println!("{}", "─".repeat(66));
+    println!("{}", "─".repeat(80));
 
     let total_saved = total_orig.saturating_sub(total_comp);
     let total_pct = if total_orig > 0 {
