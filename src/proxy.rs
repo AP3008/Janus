@@ -16,6 +16,7 @@ use crate::config::JanusConfig;
 use crate::embed::Embedder;
 use crate::metrics::CacheStatus;
 use crate::session::{SessionStore, self};
+use crate::stream_reassemble::{self, StreamTee};
 use crate::tokenizer::Tokenizer;
 use crate::tui::ProxyUpdate;
 use tokio::sync::mpsc;
@@ -225,6 +226,12 @@ async fn proxy_handler(
 
     // For streaming requests, pipe the response body through directly
     if is_streaming {
+        let should_cache = is_stateless
+            && status == StatusCode::OK
+            && state.config.cache.enabled
+            && state.cache.is_some()
+            && state.embedder.is_some();
+
         tracing::info!(
             tokens_in = tokens_before,
             tokens_out = tokens_after,
@@ -239,26 +246,112 @@ async fn proxy_handler(
             tokens_compressed: tokens_after,
             events: pipeline_result.events,
             tool_calls: pipeline_result.tool_calls,
-            cache_status: CacheStatus::Skipped,
+            cache_status: if should_cache {
+                CacheStatus::Miss
+            } else {
+                CacheStatus::Skipped
+            },
             pipeline_duration,
             upstream_duration: Some(upstream_duration),
         });
 
-        // Stream the response body through
-        let stream = upstream_response.bytes_stream().map(|chunk| {
-            chunk
-                .map(|bytes| axum::body::Bytes::from(bytes))
-                .map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                })
-        });
+        if should_cache {
+            // Tee the stream: forward chunks to client while accumulating for cache
+            let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+            let tee_stream = StreamTee::new(upstream_response.bytes_stream(), tx);
 
-        let body = Body::from_stream(stream);
-        let mut response = Response::new(body);
-        *response.status_mut() = status;
-        *response.headers_mut() = response_headers;
+            let stream = tee_stream.map(|chunk: Result<bytes::Bytes, reqwest::Error>| {
+                chunk
+                    .map(|bytes| axum::body::Bytes::from(bytes))
+                    .map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                    })
+            });
 
-        return Ok(response);
+            // Spawn background task to cache the response after streaming completes
+            let state_bg = state.clone();
+            let body_json_bg = body_json.clone();
+            let model_id_bg = model_id.clone();
+            tokio::spawn(async move {
+                match rx.await {
+                    Ok(sse_bytes) => {
+                        let sse_str = String::from_utf8_lossy(&sse_bytes);
+                        if let Some(response_bytes) =
+                            stream_reassemble::reconstruct_response(&sse_str)
+                        {
+                            if let (Some(cache), Some(embedder)) =
+                                (&state_bg.cache, &state_bg.embedder)
+                            {
+                                let user_text = extract_user_text(&body_json_bg);
+                                if !user_text.is_empty() {
+                                    match embedder.embed_one(&user_text).await {
+                                        Ok(embedding) => {
+                                            if let Err(e) = cache
+                                                .put(
+                                                    &embedding,
+                                                    &response_bytes,
+                                                    &model_id_bg,
+                                                    tokens_saved,
+                                                    state_bg.config.cache.ttl_seconds,
+                                                )
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "Failed to cache streaming response"
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    "Cached reconstructed streaming response"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "Embedding failed for streaming cache store"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::debug!(
+                                "Stream incomplete or unparseable, skipping cache"
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            "Stream tee channel dropped (client disconnect?), skipping cache"
+                        );
+                    }
+                }
+            });
+
+            let body = Body::from_stream(stream);
+            let mut response = Response::new(body);
+            *response.status_mut() = status;
+            *response.headers_mut() = response_headers;
+
+            return Ok(response);
+        } else {
+            // Non-cacheable streaming: simple passthrough
+            let stream = upstream_response.bytes_stream().map(|chunk| {
+                chunk
+                    .map(|bytes| axum::body::Bytes::from(bytes))
+                    .map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                    })
+            });
+
+            let body = Body::from_stream(stream);
+            let mut response = Response::new(body);
+            *response.status_mut() = status;
+            *response.headers_mut() = response_headers;
+
+            return Ok(response);
+        }
     }
 
     // Non-streaming: buffer the full response

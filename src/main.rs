@@ -5,6 +5,7 @@ mod metrics;
 mod pipeline;
 mod proxy;
 mod session;
+mod stream_reassemble;
 mod tokenizer;
 mod tui;
 
