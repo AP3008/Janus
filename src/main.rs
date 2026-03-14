@@ -55,6 +55,12 @@ enum CacheAction {
         #[arg(short, long, default_value = "janus.toml")]
         config: PathBuf,
     },
+    /// Test cache end-to-end (connect, embed, put, get)
+    Test {
+        /// Path to config file
+        #[arg(short, long, default_value = "janus.toml")]
+        config: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -203,6 +209,86 @@ async fn main() -> anyhow::Result<()> {
                     let stats = cache::SemanticCache::stats(&redis_cache).await?;
                     println!("Cache Statistics:");
                     println!("  Total entries: {}", stats.total_entries);
+                }
+                CacheAction::Test { config } => {
+                    let janus_config = config::JanusConfig::load(&config)?;
+
+                    // Step 1: Connect to Redis (includes RediSearch check)
+                    print!("[1/4] Redis + RediSearch connection... ");
+                    let redis_cache = cache::redis_cache::RedisSemanticCache::new(
+                        &janus_config.cache.redis_url,
+                    )
+                    .await
+                    .map_err(|e| {
+                        println!("FAIL");
+                        e
+                    })?;
+                    println!("OK");
+
+                    // Step 2: Initialize embedder
+                    print!("[2/4] Embedder init... ");
+                    let embedder = embed::Embedder::new().map_err(|e| {
+                        println!("FAIL");
+                        e
+                    })?;
+                    println!("OK (384 dims)");
+
+                    // Step 3: Embed + PUT
+                    print!("[3/4] Cache PUT... ");
+                    let test_query = "What is the capital of France?";
+                    let embedding = embedder.embed_one(test_query).await?;
+                    let mock_response = b"{\"content\":[{\"text\":\"Paris is the capital of France.\"}]}";
+                    let model = "test-model";
+                    cache::SemanticCache::put(
+                        &redis_cache,
+                        &embedding,
+                        mock_response,
+                        model,
+                        0,
+                        janus_config.cache.ttl_seconds,
+                    )
+                    .await
+                    .map_err(|e| {
+                        println!("FAIL");
+                        e
+                    })?;
+                    println!("OK (TTL {}s)", janus_config.cache.ttl_seconds);
+
+                    // Step 4: GET and verify hit
+                    print!("[4/4] Cache GET... ");
+                    let t0 = Instant::now();
+                    let result = cache::SemanticCache::get(
+                        &redis_cache,
+                        &embedding,
+                        janus_config.cache.similarity_cutoff,
+                        model,
+                    )
+                    .await
+                    .map_err(|e| {
+                        println!("FAIL");
+                        e
+                    })?;
+                    let latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                    match result {
+                        Some(cached) => {
+                            println!(
+                                "OK (similarity: {:.3}, latency: {:.1}ms)",
+                                cached.similarity, latency_ms
+                            );
+                            println!();
+                            println!("Cache is working correctly.");
+                        }
+                        None => {
+                            println!("FAIL (no hit returned for identical query)");
+                            println!();
+                            println!(
+                                "Cache PUT succeeded but GET missed. \
+                                 Check similarity_cutoff ({}) or Redis index.",
+                                janus_config.cache.similarity_cutoff
+                            );
+                        }
+                    }
                 }
             }
         }
