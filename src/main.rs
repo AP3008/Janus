@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
             let input_cost = janus_config.pricing.input_cost_per_1k;
 
             // Create TUI channel
-            let (tui_tx, tui_rx) = mpsc::unbounded_channel::<tui::ProxyUpdate>();
+            let (tui_tx, tui_rx) = mpsc::unbounded_channel::<tui::TuiMessage>();
 
             if no_tui {
                 // Initialize tracing for non-TUI mode
