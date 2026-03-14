@@ -64,6 +64,7 @@ pub struct SessionStats {
     pub total_tokens_compressed: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub cache_tokens_saved: u64,
 }
 
 impl SessionStats {

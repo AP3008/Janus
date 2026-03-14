@@ -83,10 +83,13 @@ fn draw_session_panel(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
     // Cache stats
     let cache_ratio = app.stats.cache_hit_ratio() * 100.0;
+    let cache_saved_dollars = app.stats.cache_tokens_saved as f64 / 1000.0 * app.input_cost_per_1k;
     let cache_text = vec![
-        Line::from(format!("  hits     {}", app.stats.cache_hits)),
-        Line::from(format!("  misses   {}", app.stats.cache_misses)),
-        Line::from(format!("  ratio    {:.0}%", cache_ratio)),
+        Line::from(format!("  hits       {}", app.stats.cache_hits)),
+        Line::from(format!("  misses     {}", app.stats.cache_misses)),
+        Line::from(format!("  ratio      {:.0}%", cache_ratio)),
+        Line::from(format!("  tok saved  {}", app.stats.cache_tokens_saved)),
+        Line::from(format!("  $ saved    ${:.2}", cache_saved_dollars)),
     ];
 
     let cache_block = Block::default()
@@ -103,36 +106,47 @@ fn draw_last_request_panel(frame: &mut Frame, area: Rect, app: &TuiApp) {
         .split(area);
 
     // Last request info
-    let (status_text, orig, comp, pct, pipeline_ms, upstream_ms) = if let Some(ref lr) = app.last_request {
+    let request_text = if let Some(ref lr) = app.last_request {
+        let is_cache_hit = matches!(&lr.cache_status, crate::metrics::CacheStatus::Hit { .. });
         let status = match &lr.cache_status {
-            crate::metrics::CacheStatus::Hit { similarity } => format!("HIT ({:.2})", similarity),
-            crate::metrics::CacheStatus::Miss => "MISS → forwarded".to_string(),
+            crate::metrics::CacheStatus::Hit { similarity } => {
+                format!("CACHE HIT ({:.2} sim)", similarity)
+            }
+            crate::metrics::CacheStatus::Miss => "MISS -> forwarded".to_string(),
             crate::metrics::CacheStatus::Skipped => "skipped".to_string(),
         };
-        let pct = if lr.tokens_original > 0 {
-            (lr.tokens_original - lr.tokens_compressed) as f64 / lr.tokens_original as f64 * 100.0
-        } else {
-            0.0
-        };
-        (
-            status,
-            lr.tokens_original,
-            lr.tokens_compressed,
-            pct,
-            lr.pipeline_duration.as_millis(),
-            lr.upstream_duration.map(|d| d.as_millis()).unwrap_or(0),
-        )
-    } else {
-        ("waiting...".to_string(), 0, 0, 0.0, 0, 0)
-    };
 
-    let request_text = vec![
-        Line::from(format!("  Status      {}", status_text)),
-        Line::from(format!("  Original    {} tokens", orig)),
-        Line::from(format!("  Compressed  {} tokens ({:.1}% ↓)", comp, pct)),
-        Line::from(format!("  Pipeline    {}ms", pipeline_ms)),
-        Line::from(format!("  Upstream    {}ms", upstream_ms)),
-    ];
+        if is_cache_hit {
+            vec![
+                Line::from(vec![
+                    Span::raw("  Cache       "),
+                    Span::styled(status, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(format!("  Tokens      {} (100% saved)", lr.tokens_original)),
+                Line::from("  Upstream    skipped (served from cache)"),
+            ]
+        } else {
+            let pct = if lr.tokens_original > 0 {
+                (lr.tokens_original - lr.tokens_compressed) as f64
+                    / lr.tokens_original as f64
+                    * 100.0
+            } else {
+                0.0
+            };
+            vec![
+                Line::from(format!("  Cache       {}", status)),
+                Line::from(format!("  Original    {} tokens", lr.tokens_original)),
+                Line::from(format!("  Compressed  {} tokens ({:.1}% saved)", lr.tokens_compressed, pct)),
+                Line::from(format!("  Pipeline    {}ms", lr.pipeline_duration.as_millis())),
+                Line::from(format!(
+                    "  Upstream    {}ms",
+                    lr.upstream_duration.map(|d| d.as_millis()).unwrap_or(0)
+                )),
+            ]
+        }
+    } else {
+        vec![Line::from("  waiting...")]
+    };
 
     let request_block = Block::default()
         .title(" LAST REQUEST ")
