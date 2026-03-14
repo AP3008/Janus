@@ -1,5 +1,6 @@
 mod config;
 mod metrics;
+mod pipeline;
 mod proxy;
 mod tokenizer;
 
