@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::StreamExt;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Instant;
@@ -187,6 +188,12 @@ async fn proxy_handler(
         }
     }
 
+    // Check if this is a streaming request
+    let is_streaming = body_json
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
     // Forward the compressed body
     let upstream_start = Instant::now();
     let upstream_response = req
@@ -208,6 +215,45 @@ async fn proxy_handler(
         response_headers.insert(name.clone(), value.clone());
     }
 
+    // For streaming requests, pipe the response body through directly
+    if is_streaming {
+        tracing::info!(
+            tokens_in = tokens_before,
+            tokens_out = tokens_after,
+            upstream_ms = upstream_duration.as_millis() as u64,
+            response_status = status.as_u16(),
+            "Streaming request forwarded"
+        );
+
+        // Send TUI update immediately (we won't wait for stream to finish)
+        let _ = state.tui_tx.send(ProxyUpdate {
+            tokens_original: tokens_before,
+            tokens_compressed: tokens_after,
+            events: pipeline_result.events,
+            tool_calls: pipeline_result.tool_calls,
+            cache_status: CacheStatus::Skipped,
+            pipeline_duration,
+            upstream_duration: Some(upstream_duration),
+        });
+
+        // Stream the response body through
+        let stream = upstream_response.bytes_stream().map(|chunk| {
+            chunk
+                .map(|bytes| axum::body::Bytes::from(bytes))
+                .map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                })
+        });
+
+        let body = Body::from_stream(stream);
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        *response.headers_mut() = response_headers;
+
+        return Ok(response);
+    }
+
+    // Non-streaming: buffer the full response
     let response_bytes = upstream_response.bytes().await.map_err(|e| {
         tracing::error!(error = %e, "Failed to read upstream response");
         StatusCode::BAD_GATEWAY

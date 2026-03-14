@@ -1674,6 +1674,7 @@ dependencies = [
  "crossterm",
  "dashmap",
  "fastembed",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
