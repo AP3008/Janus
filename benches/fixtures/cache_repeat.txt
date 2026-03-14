@@ -4,7 +4,7 @@
   "messages": [
     {
       "role": "user",
-      "content": "What is the capital of France?"
+      "content": "What is the capital of France and what are the main tourist attractions there? Please provide a detailed overview including historical context, population, and cultural significance."
     }
   ]
 }
