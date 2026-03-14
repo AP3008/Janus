@@ -15,7 +15,7 @@ use crate::cache::SemanticCache;
 use crate::config::JanusConfig;
 use crate::embed::Embedder;
 use crate::metrics::CacheStatus;
-use crate::session::SessionData;
+use crate::session::{self, SessionData};
 use crate::stream_reassemble::{self, StreamTee};
 use crate::tokenizer::Tokenizer;
 use crate::tui::{ProxyUpdate, TuiMessage};
@@ -84,8 +84,9 @@ async fn proxy_handler(
         .unwrap_or("unknown")
         .to_string();
 
-    // Scope cache by model
-    let cache_scope = model_id.clone();
+    // Scope cache by instance + model to prevent cross-instance cache hits
+    let instance_id = session::derive_instance_id(&body_json);
+    let cache_scope = format!("{}/{}", instance_id, model_id);
 
     if state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
