@@ -138,6 +138,7 @@ fn write_text_back(body: &mut serde_json::Value, path: &[usize], text: &str) {
 }
 
 /// Result of running the pipeline
+#[derive(Default)]
 pub struct PipelineResult {
     pub events: Vec<CompressionEvent>,
     pub tool_calls: Vec<ToolCallInfo>,

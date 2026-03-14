@@ -140,14 +140,22 @@ async fn proxy_handler(
     };
     let session_data = state.session_store.get_or_create(&session_id);
 
-    // Run compression pipeline
+    // Run compression pipeline (with panic recovery to avoid crashing the proxy)
     let pipeline_start = Instant::now();
-    let pipeline_result = crate::pipeline::process(
-        &mut body_json,
-        &state.tokenizer,
-        &state.config.pipeline,
-        Some(&session_data),
-    );
+    let pipeline_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::pipeline::process(
+            &mut body_json,
+            &state.tokenizer,
+            &state.config.pipeline,
+            Some(&session_data),
+        )
+    })) {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("Pipeline panicked: {:?}", e);
+            crate::pipeline::PipelineResult::default()
+        }
+    };
     let pipeline_duration = pipeline_start.elapsed();
 
     let tokens_after = state.tokenizer.count_message_tokens(&body_json);
