@@ -350,7 +350,7 @@ fn draw_last_request(frame: &mut Frame, area: Rect, app: &TuiApp) {
         ]));
     } else {
         let pct = if lr.tokens_original > 0 {
-            (lr.tokens_original - lr.tokens_compressed) as f64 / lr.tokens_original as f64 * 100.0
+            lr.tokens_original.saturating_sub(lr.tokens_compressed) as f64 / lr.tokens_original as f64 * 100.0
         } else {
             0.0
         };

@@ -102,7 +102,7 @@ fn default_redis_url() -> String {
 }
 
 fn default_similarity_cutoff() -> f64 {
-    0.75
+    0.85
 }
 
 fn default_ttl() -> u64 {
