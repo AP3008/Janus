@@ -1,6 +1,7 @@
 <h1 align="center">Janus</h1>
-<img src="./assets/janus.jpg" align="center"></img>
+
 <div align="center">
+<a href=https://en.wikipedia.org/wiki/Janus><img src="./assets/janus.jpg" align="center"></img></a>
   
 [![Rust](https://img.shields.io/github/languages/top/AP3008/Janus)](https://github.com/AP3008/Janus)
 [![Stars](https://img.shields.io/github/stars/AP3008/Janus)](https://github.com/AP3008/Janus/stargazers)
@@ -8,6 +9,8 @@
 [![License](https://img.shields.io/github/license/AP3008/Janus)](LICENSE)
 
 An LLM token compression proxy for the Anthropic API. Janus sits between your application and Claude, intelligently compressing requests to reduce token usage and cost without sacrificing context quality.
+
+**1x GenAI Genesis Winner: 🏆 Google Sustainability Hack**
 
 </div>
 
