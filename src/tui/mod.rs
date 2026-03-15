@@ -61,6 +61,7 @@ pub struct TuiApp {
     pub cmd_tx: mpsc::UnboundedSender<TuiCommand>,
     pub last_request_time: Option<Instant>,
     pub idle_flush_sent: bool,
+    pub auto_flush_enabled: bool,
 }
 
 impl TuiApp {
@@ -87,6 +88,7 @@ impl TuiApp {
             cmd_tx,
             last_request_time: None,
             idle_flush_sent: false,
+            auto_flush_enabled: true,
         }
     }
 
@@ -104,6 +106,9 @@ impl TuiApp {
             }
             KeyCode::Char('f') => {
                 let _ = self.cmd_tx.send(TuiCommand::FlushCache);
+            }
+            KeyCode::Char('a') => {
+                self.auto_flush_enabled = !self.auto_flush_enabled;
             }
             KeyCode::Up => {
                 self.log_scroll = self.log_scroll.saturating_sub(1);
@@ -236,7 +241,7 @@ pub fn run_tui(
 
         // Idle auto-flush: if no requests for 120s, flush cache
         if let Some(last) = app.last_request_time {
-            if !app.idle_flush_sent && last.elapsed() > Duration::from_secs(120) {
+            if app.auto_flush_enabled && !app.idle_flush_sent && last.elapsed() > Duration::from_secs(120) {
                 let _ = app.cmd_tx.send(TuiCommand::FlushCache);
                 app.idle_flush_sent = true;
             }

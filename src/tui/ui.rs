@@ -129,7 +129,7 @@ fn draw_welcome(frame: &mut Frame, app: &TuiApp) {
         chunks[1],
     );
 
-    draw_footer(frame, chunks[2]);
+    draw_footer(frame, chunks[2], app);
 }
 
 // ── active state ─────────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ fn draw_active(frame: &mut Frame, app: &TuiApp) {
     draw_hero_savings(frame, chunks[2], app);
     draw_main_panels(frame, chunks[3], app);
     draw_request_log(frame, chunks[4], app);
-    draw_footer(frame, chunks[5]);
+    draw_footer(frame, chunks[5], app);
 }
 
 // ── error bar ────────────────────────────────────────────────────────────
@@ -707,8 +707,19 @@ fn draw_request_log(frame: &mut Frame, area: Rect, app: &TuiApp) {
 
 // ── footer ───────────────────────────────────────────────────────────────
 
-fn draw_footer(frame: &mut Frame, area: Rect) {
+fn draw_footer(frame: &mut Frame, area: Rect, app: &TuiApp) {
     let sep = Span::styled(" │ ", Style::default().fg(Color::DarkGray));
+
+    let auto_flush_label = if app.auto_flush_enabled {
+        "Auto-Flush ON"
+    } else {
+        "Auto-Flush OFF"
+    };
+    let auto_flush_color = if app.auto_flush_enabled {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
 
     let footer = Line::from(vec![
         Span::styled(" q", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -721,7 +732,10 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
         Span::raw(" Reset"),
         sep.clone(),
         Span::styled("f", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" Flush Cache"),
+        Span::raw(" Flush"),
+        sep.clone(),
+        Span::styled("a", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}", auto_flush_label), Style::default().fg(auto_flush_color)),
         sep,
         Span::styled("↑↓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw(" Scroll"),
