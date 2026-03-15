@@ -157,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
                 embedder,
                 ast_pruning_enabled: std::sync::atomic::AtomicBool::new(ast_pruning_default),
                 inmem_cache: dashmap::DashMap::new(),
+                inflight: dashmap::DashMap::new(),
             });
 
             let state_for_shutdown = state.clone();

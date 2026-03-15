@@ -21,7 +21,7 @@ use crate::stream_reassemble::{self, StreamTee};
 use crate::tokenizer::Tokenizer;
 use crate::tui::ProxyUpdate;
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub struct AppState {
     pub config: JanusConfig,
@@ -36,6 +36,9 @@ pub struct AppState {
     /// Fast in-memory exact-match cache to avoid race condition with async Redis writes.
     /// Key: "{model}\0{user_text}", Value: (response_body, tokens_saved)
     pub inmem_cache: DashMap<String, (Vec<u8>, usize)>,
+    /// Tracks in-flight requests by cache key so duplicate requests wait instead of going upstream.
+    /// Value is a watch::Receiver that signals `true` when the cache entry is populated.
+    pub inflight: DashMap<String, watch::Receiver<bool>>,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -145,6 +148,56 @@ async fn proxy_handler(
         }
     }
 
+    // Check if an identical request is already in-flight; if so, wait for it
+    if let Some(ref key) = inmem_key {
+        if let Some(rx_ref) = state.inflight.get(key) {
+            let mut rx = rx_ref.clone();
+            drop(rx_ref); // release DashMap lock
+            // Wait up to 30s for the in-flight request to populate the cache
+            if let Ok(Ok(_)) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                rx.changed(),
+            ).await {
+                // Re-check in-memory cache
+                if let Some(entry) = state.inmem_cache.get(key) {
+                    let (ref response_body, tokens_saved) = *entry;
+                    tracing::info!(tokens_saved = tokens_saved, "Cache HIT (waited for in-flight)");
+
+                    let _ = state.tui_tx.send(ProxyUpdate {
+                        tokens_original: tokens_before,
+                        tokens_compressed: 0,
+                        events: Vec::new(),
+                        tool_calls: Vec::new(),
+                        cache_status: CacheStatus::Hit { similarity: 1.0 },
+                        pipeline_duration: std::time::Duration::ZERO,
+                        upstream_duration: None,
+                        error_status: None,
+                    });
+
+                    let (body_bytes, content_type) = if is_streaming {
+                        match stream_reassemble::json_to_sse(response_body) {
+                            Some(sse) => (sse, "text/event-stream"),
+                            None => (response_body.clone(), "application/json"),
+                        }
+                    } else {
+                        (response_body.clone(), "application/json")
+                    };
+
+                    let mut response = Response::new(Body::from(body_bytes));
+                    *response.status_mut() = StatusCode::OK;
+                    response
+                        .headers_mut()
+                        .insert("content-type", content_type.parse().unwrap());
+                    response
+                        .headers_mut()
+                        .insert("x-janus-cache", "HIT".parse().unwrap());
+                    return Ok(response);
+                }
+            }
+            // If wait failed (timeout/sender dropped), fall through to normal flow
+        }
+    }
+
     if state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
             if !user_text_for_cache.is_empty() {
@@ -216,6 +269,15 @@ async fn proxy_handler(
             }
         }
     }
+
+    // Register this request as in-flight so duplicates can wait for it
+    let mut inflight_tx = if let Some(ref key) = inmem_key {
+        let (tx, rx) = watch::channel(false);
+        state.inflight.insert(key.clone(), rx);
+        Some(tx)
+    } else {
+        None
+    };
 
     // Derive session ID for dedup
     let session_id = if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
@@ -371,6 +433,7 @@ async fn proxy_handler(
             let user_text_bg = user_text_for_cache.clone();
             let model_id_bg = model_id.clone();
             let inmem_key_bg = inmem_key.clone();
+            let inflight_tx_bg = inflight_tx.take();
             tokio::spawn(async move {
                 match rx.await {
                     Ok(sse_bytes) => {
@@ -380,8 +443,14 @@ async fn proxy_handler(
                         {
                             if response_has_tool_use(&response_bytes) {
                                 tracing::debug!("Response contains tool_use, skipping cache");
+                                if let Some(ref key) = inmem_key_bg {
+                                    state_bg.inflight.remove(key);
+                                }
                             } else if response_has_thinking(&response_bytes) {
                                 tracing::debug!("Response contains thinking blocks, skipping cache");
+                                if let Some(ref key) = inmem_key_bg {
+                                    state_bg.inflight.remove(key);
+                                }
                             } else {
                                 // Store in in-memory cache immediately (before slow embedding + Redis)
                                 if let Some(ref key) = inmem_key_bg {
@@ -392,6 +461,11 @@ async fn proxy_handler(
                                         key.clone(),
                                         (response_bytes.clone(), tokens_saved),
                                     );
+                                    // Signal waiting requests that cache is populated
+                                    if let Some(ref tx) = inflight_tx_bg {
+                                        let _ = tx.send(true);
+                                    }
+                                    state_bg.inflight.remove(key);
                                 }
 
                                 if let (Some(cache), Some(embedder)) =
@@ -431,12 +505,18 @@ async fn proxy_handler(
                                 }
                             }
                         } else {
+                            if let Some(ref key) = inmem_key_bg {
+                                state_bg.inflight.remove(key);
+                            }
                             tracing::debug!(
                                 "Stream incomplete or unparseable, skipping cache"
                             );
                         }
                     }
                     Err(_) => {
+                        if let Some(ref key) = inmem_key_bg {
+                            state_bg.inflight.remove(key);
+                        }
                         tracing::debug!(
                             "Stream tee channel dropped (client disconnect?), skipping cache"
                         );
@@ -451,6 +531,10 @@ async fn proxy_handler(
 
             return Ok(response);
         } else {
+            // Clean up inflight since we're not caching this streaming response
+            if let Some(ref key) = inmem_key {
+                state.inflight.remove(key);
+            }
             // Non-cacheable streaming: simple passthrough
             let stream = upstream_response.bytes_stream().map(|chunk| {
                 chunk
@@ -488,6 +572,11 @@ async fn proxy_handler(
                         key.clone(),
                         (response_bytes.to_vec(), tokens_saved),
                     );
+                    // Signal waiting requests that cache is populated
+                    if let Some(ref tx) = inflight_tx {
+                        let _ = tx.send(true);
+                    }
+                    state.inflight.remove(key);
                 }
                 match embedder.embed_one(&user_text_for_cache).await {
                     Ok(embedding) => {
@@ -519,6 +608,11 @@ async fn proxy_handler(
     } else {
         CacheStatus::Skipped
     };
+
+    // Clean up inflight entry if it wasn't already removed during cache insert
+    if let Some(ref key) = inmem_key {
+        state.inflight.remove(key);
+    }
 
     tracing::info!(
         tokens_in = tokens_before,
