@@ -34,9 +34,6 @@ Five sub-stages of pattern-based compression:
 **Stage C -- AST Pruning**
 Uses tree-sitter to parse code blocks (Python, JavaScript, Rust, Go) and remove functions that are unlikely to be relevant to the current query. Only applied to blocks above a configurable line threshold.
 
-**Stage D -- Semantic Trimming**
-Embedding-based content relevance filtering (currently a stub for future expansion).
-
 ### Semantic Cache
 
 On top of the compression pipeline, Janus maintains a semantic cache backed by Redis with vector similarity search. Requests that are semantically similar to previously seen requests (above a configurable similarity threshold) return cached responses directly, skipping the upstream call entirely.
@@ -51,7 +48,6 @@ Client --> Janus Proxy (localhost:8080) --> Anthropic API
                |
                |-- Compression Pipeline (Stages A-D)
                |-- Semantic Cache (Redis + Vector Search)
-               |-- Session Tracker (per-conversation state)
                |-- TUI Dashboard (real-time metrics)
 ```
 
