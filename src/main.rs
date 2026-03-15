@@ -156,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
                 cache: cache_box,
                 embedder,
                 ast_pruning_enabled: std::sync::atomic::AtomicBool::new(ast_pruning_default),
+                inmem_cache: dashmap::DashMap::new(),
             });
 
             let state_for_shutdown = state.clone();
@@ -192,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                     while let Some(cmd) = cmd_rx.recv().await {
                         match cmd {
                             tui::TuiCommand::FlushCache => {
+                                state_for_cmd.inmem_cache.clear();
                                 if let Some(ref cache) = state_for_cmd.cache {
                                     match cache.flush().await {
                                         Ok(count) => {

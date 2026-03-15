@@ -20,6 +20,7 @@ use crate::session::{SessionStore, self};
 use crate::stream_reassemble::{self, StreamTee};
 use crate::tokenizer::Tokenizer;
 use crate::tui::ProxyUpdate;
+use dashmap::DashMap;
 use tokio::sync::mpsc;
 
 pub struct AppState {
@@ -32,6 +33,9 @@ pub struct AppState {
     pub cache: Option<Box<dyn SemanticCache>>,
     pub embedder: Option<Embedder>,
     pub ast_pruning_enabled: AtomicBool,
+    /// Fast in-memory exact-match cache to avoid race condition with async Redis writes.
+    /// Key: "{model}\0{user_text}", Value: (response_body, tokens_saved)
+    pub inmem_cache: DashMap<String, (Vec<u8>, usize)>,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -95,6 +99,51 @@ async fn proxy_handler(
         .and_then(|m| m.as_str())
         .unwrap_or("unknown")
         .to_string();
+
+    // Build exact-match cache key for the fast in-memory layer
+    let inmem_key = if state.config.cache.enabled && !user_text_for_cache.is_empty() {
+        Some(format!("{}\0{}", model_id, user_text_for_cache))
+    } else {
+        None
+    };
+
+    // Check in-memory exact-match cache first (avoids race with async Redis writes)
+    if let Some(ref key) = inmem_key {
+        if let Some(entry) = state.inmem_cache.get(key) {
+            let (ref response_body, tokens_saved) = *entry;
+            tracing::info!(tokens_saved = tokens_saved, "Cache HIT (in-memory)");
+
+            let _ = state.tui_tx.send(ProxyUpdate {
+                tokens_original: tokens_before,
+                tokens_compressed: 0,
+                events: Vec::new(),
+                tool_calls: Vec::new(),
+                cache_status: CacheStatus::Hit { similarity: 1.0 },
+                pipeline_duration: std::time::Duration::ZERO,
+                upstream_duration: None,
+                error_status: None,
+            });
+
+            let (body_bytes, content_type) = if is_streaming {
+                match stream_reassemble::json_to_sse(response_body) {
+                    Some(sse) => (sse, "text/event-stream"),
+                    None => (response_body.clone(), "application/json"),
+                }
+            } else {
+                (response_body.clone(), "application/json")
+            };
+
+            let mut response = Response::new(Body::from(body_bytes));
+            *response.status_mut() = StatusCode::OK;
+            response
+                .headers_mut()
+                .insert("content-type", content_type.parse().unwrap());
+            response
+                .headers_mut()
+                .insert("x-janus-cache", "HIT".parse().unwrap());
+            return Ok(response);
+        }
+    }
 
     if state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
@@ -321,6 +370,7 @@ async fn proxy_handler(
             let state_bg = state.clone();
             let user_text_bg = user_text_for_cache.clone();
             let model_id_bg = model_id.clone();
+            let inmem_key_bg = inmem_key.clone();
             tokio::spawn(async move {
                 match rx.await {
                     Ok(sse_bytes) => {
@@ -332,37 +382,50 @@ async fn proxy_handler(
                                 tracing::debug!("Response contains tool_use, skipping cache");
                             } else if response_has_thinking(&response_bytes) {
                                 tracing::debug!("Response contains thinking blocks, skipping cache");
-                            } else if let (Some(cache), Some(embedder)) =
-                                (&state_bg.cache, &state_bg.embedder)
-                            {
-                                if !user_text_bg.is_empty() {
-                                    match embedder.embed_one(&user_text_bg).await {
-                                        Ok(embedding) => {
-                                            if let Err(e) = cache
-                                                .put(
-                                                    &embedding,
-                                                    &response_bytes,
-                                                    &model_id_bg,
-                                                    tokens_saved,
-                                                    state_bg.config.cache.ttl_seconds,
-                                                )
-                                                .await
-                                            {
+                            } else {
+                                // Store in in-memory cache immediately (before slow embedding + Redis)
+                                if let Some(ref key) = inmem_key_bg {
+                                    if state_bg.inmem_cache.len() > 1000 {
+                                        state_bg.inmem_cache.clear();
+                                    }
+                                    state_bg.inmem_cache.insert(
+                                        key.clone(),
+                                        (response_bytes.clone(), tokens_saved),
+                                    );
+                                }
+
+                                if let (Some(cache), Some(embedder)) =
+                                    (&state_bg.cache, &state_bg.embedder)
+                                {
+                                    if !user_text_bg.is_empty() {
+                                        match embedder.embed_one(&user_text_bg).await {
+                                            Ok(embedding) => {
+                                                if let Err(e) = cache
+                                                    .put(
+                                                        &embedding,
+                                                        &response_bytes,
+                                                        &model_id_bg,
+                                                        tokens_saved,
+                                                        state_bg.config.cache.ttl_seconds,
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        error = %e,
+                                                        "Failed to cache streaming response"
+                                                    );
+                                                } else {
+                                                    tracing::info!(
+                                                        "Cached reconstructed streaming response"
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
                                                 tracing::warn!(
                                                     error = %e,
-                                                    "Failed to cache streaming response"
-                                                );
-                                            } else {
-                                                tracing::info!(
-                                                    "Cached reconstructed streaming response"
+                                                    "Embedding failed for streaming cache store"
                                                 );
                                             }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                "Embedding failed for streaming cache store"
-                                            );
                                         }
                                     }
                                 }
@@ -416,6 +479,16 @@ async fn proxy_handler(
     let cache_status = if status == StatusCode::OK && state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
             if !user_text_for_cache.is_empty() && !response_has_tool_use(&response_bytes) && !response_has_thinking(&response_bytes) {
+                // Store in in-memory cache for fast exact-match lookups
+                if let Some(ref key) = inmem_key {
+                    if state.inmem_cache.len() > 1000 {
+                        state.inmem_cache.clear();
+                    }
+                    state.inmem_cache.insert(
+                        key.clone(),
+                        (response_bytes.to_vec(), tokens_saved),
+                    );
+                }
                 match embedder.embed_one(&user_text_for_cache).await {
                     Ok(embedding) => {
                         if let Err(e) = cache
