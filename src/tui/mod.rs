@@ -58,6 +58,7 @@ pub struct TuiApp {
     pub input_cost_per_1k: f64,
     pub tick_count: u64,
     pub last_error: Option<(u16, String, Instant)>,
+    pub flush_status: Option<Instant>,
     pub cmd_tx: mpsc::UnboundedSender<TuiCommand>,
     pub last_request_time: Option<Instant>,
     pub idle_flush_sent: bool,
@@ -85,6 +86,7 @@ impl TuiApp {
             input_cost_per_1k,
             tick_count: 0,
             last_error: None,
+            flush_status: None,
             cmd_tx,
             last_request_time: None,
             idle_flush_sent: false,
@@ -106,6 +108,7 @@ impl TuiApp {
             }
             KeyCode::Char('f') => {
                 let _ = self.cmd_tx.send(TuiCommand::FlushCache);
+                self.flush_status = Some(Instant::now());
             }
             KeyCode::Char('a') => {
                 self.auto_flush_enabled = !self.auto_flush_enabled;

@@ -138,13 +138,16 @@ fn draw_active(frame: &mut Frame, app: &TuiApp) {
     let show_error = app.last_error.as_ref().map_or(false, |(_, _, t)| {
         t.elapsed() < std::time::Duration::from_secs(30)
     });
-    let error_height = if show_error { 2 } else { 0 };
+    let show_flush = app.flush_status.as_ref().map_or(false, |t| {
+        t.elapsed() < std::time::Duration::from_secs(5)
+    });
+    let status_bar_height = if show_error { 2 } else if show_flush { 2 } else { 0 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),            // Header
-            Constraint::Length(error_height), // Error bar (conditional)
+            Constraint::Length(status_bar_height), // Error/status bar (conditional)
             Constraint::Length(5),            // Hero savings
             Constraint::Min(10),             // Main panels
             Constraint::Length(10),           // Request log
@@ -155,6 +158,8 @@ fn draw_active(frame: &mut Frame, app: &TuiApp) {
     draw_header(frame, chunks[0], app);
     if show_error {
         draw_error_bar(frame, chunks[1], app);
+    } else if show_flush {
+        draw_flush_bar(frame, chunks[1], app);
     }
     draw_hero_savings(frame, chunks[2], app);
     draw_main_panels(frame, chunks[3], app);
@@ -179,6 +184,32 @@ fn draw_error_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
                 Style::default()
                     .fg(Color::White)
                     .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", ago_str), Style::default().fg(Color::DarkGray)),
+        ]);
+
+        frame.render_widget(Paragraph::new(line), area);
+    }
+}
+
+// ── flush status bar ─────────────────────────────────────────────────────
+
+fn draw_flush_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
+    if let Some(ref when) = app.flush_status {
+        let ago = when.elapsed().as_secs();
+        let ago_str = if ago == 0 {
+            "just now".to_string()
+        } else {
+            format!("{}s ago", ago)
+        };
+
+        let line = Line::from(vec![
+            Span::styled(
+                " ✓ Cache flushed successfully ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("  {}", ago_str), Style::default().fg(Color::DarkGray)),
