@@ -767,6 +767,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &TuiApp) {
         sep.clone(),
         Span::styled("a", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {}", auto_flush_label), Style::default().fg(auto_flush_color)),
+        sep.clone(),
+        Span::styled("t", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if app.ast_pruning_enabled { " AST ON" } else { " AST OFF" },
+            Style::default().fg(if app.ast_pruning_enabled { Color::Green } else { Color::DarkGray }),
+        ),
         sep,
         Span::styled("↑↓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw(" Scroll"),

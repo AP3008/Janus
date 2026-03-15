@@ -41,6 +41,7 @@ pub struct RequestEntry {
 #[derive(Debug)]
 pub enum TuiCommand {
     FlushCache,
+    ToggleAstPruning,
 }
 
 /// TUI application state
@@ -63,6 +64,7 @@ pub struct TuiApp {
     pub last_request_time: Option<Instant>,
     pub idle_flush_sent: bool,
     pub auto_flush_enabled: bool,
+    pub ast_pruning_enabled: bool,
 }
 
 impl TuiApp {
@@ -91,6 +93,7 @@ impl TuiApp {
             last_request_time: None,
             idle_flush_sent: false,
             auto_flush_enabled: true,
+            ast_pruning_enabled: true,
         }
     }
 
@@ -112,6 +115,10 @@ impl TuiApp {
             }
             KeyCode::Char('a') => {
                 self.auto_flush_enabled = !self.auto_flush_enabled;
+            }
+            KeyCode::Char('t') => {
+                self.ast_pruning_enabled = !self.ast_pruning_enabled;
+                let _ = self.cmd_tx.send(TuiCommand::ToggleAstPruning);
             }
             KeyCode::Up => {
                 self.log_scroll = self.log_scroll.saturating_sub(1);

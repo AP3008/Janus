@@ -147,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
                 (None, None)
             };
 
+            let ast_pruning_default = janus_config.pipeline.ast_pruning;
             let state = Arc::new(proxy::AppState {
                 config: janus_config,
                 client: reqwest::Client::new(),
@@ -156,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
                 session_store,
                 cache: cache_box,
                 embedder,
+                ast_pruning_enabled: std::sync::atomic::AtomicBool::new(ast_pruning_default),
             });
 
             let state_for_shutdown = state.clone();
@@ -202,6 +204,10 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
                                 }
+                            }
+                            tui::TuiCommand::ToggleAstPruning => {
+                                let prev = state_for_cmd.ast_pruning_enabled.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                                tracing::info!(enabled = !prev, "AST pruning toggled via TUI");
                             }
                         }
                     }

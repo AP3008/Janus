@@ -9,6 +9,7 @@ use axum::{
 use futures_util::StreamExt;
 use reqwest::Client;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::cache::SemanticCache;
@@ -30,6 +31,7 @@ pub struct AppState {
     pub session_store: SessionStore,
     pub cache: Option<Box<dyn SemanticCache>>,
     pub embedder: Option<Embedder>,
+    pub ast_pruning_enabled: AtomicBool,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -179,10 +181,12 @@ async fn proxy_handler(
     let original_body_json = body_json.clone();
     let pipeline_start = Instant::now();
     let pipeline_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut pipeline_config = state.config.pipeline.clone();
+        pipeline_config.ast_pruning = state.ast_pruning_enabled.load(Ordering::Relaxed);
         crate::pipeline::process(
             &mut body_json,
             &state.tokenizer,
-            &state.config.pipeline,
+            &pipeline_config,
             Some(&session_data),
         )
     })) {
