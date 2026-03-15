@@ -1,5 +1,4 @@
 use serde::Serialize;
-use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CompressionEvent {
@@ -7,20 +6,11 @@ pub struct CompressionEvent {
     pub tokens_after: usize,
     pub stage_name: String,
     pub reason: String,
-    #[serde(skip)]
-    pub timestamp: Instant,
 }
 
 impl CompressionEvent {
     pub fn tokens_saved(&self) -> usize {
         self.tokens_before.saturating_sub(self.tokens_after)
-    }
-
-    pub fn compression_ratio(&self) -> f64 {
-        if self.tokens_before == 0 {
-            return 0.0;
-        }
-        1.0 - (self.tokens_after as f64 / self.tokens_before as f64)
     }
 }
 
@@ -37,17 +27,6 @@ pub struct ToolCallInfo {
 pub enum ToolCallStatus {
     Kept,
     Deduped,
-}
-
-#[derive(Debug, Clone)]
-pub struct RequestMetrics {
-    pub events: Vec<CompressionEvent>,
-    pub tool_calls: Vec<ToolCallInfo>,
-    pub tokens_original: usize,
-    pub tokens_compressed: usize,
-    pub cache_status: CacheStatus,
-    pub pipeline_duration: std::time::Duration,
-    pub upstream_duration: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,16 +64,5 @@ impl SessionStats {
             return 0.0;
         }
         self.cache_hits as f64 / total as f64
-    }
-
-    pub fn update(&mut self, metrics: &RequestMetrics) {
-        self.total_requests += 1;
-        self.total_tokens_original += metrics.tokens_original as u64;
-        self.total_tokens_compressed += metrics.tokens_compressed as u64;
-        match &metrics.cache_status {
-            CacheStatus::Hit { .. } => self.cache_hits += 1,
-            CacheStatus::Miss => self.cache_misses += 1,
-            CacheStatus::Skipped => {}
-        }
     }
 }

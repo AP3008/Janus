@@ -134,7 +134,6 @@ fn remove_docstrings(content: &str, tokenizer: &Tokenizer) -> (String, Option<Co
             tokens_after,
             stage_name: "B1_docstrings".to_string(),
             reason: "Removed docstrings and doc-comments".to_string(),
-            timestamp: std::time::Instant::now(),
         })
     } else {
         None
@@ -216,7 +215,6 @@ fn strip_comments(content: &str, tokenizer: &Tokenizer) -> (String, Option<Compr
             tokens_after,
             stage_name: "B2_comments".to_string(),
             reason: "Stripped inline comments".to_string(),
-            timestamp: std::time::Instant::now(),
         })
     } else {
         None
@@ -305,7 +303,6 @@ fn normalize_whitespace(content: &str, tokenizer: &Tokenizer) -> (String, Option
             tokens_after,
             stage_name: "B3_whitespace".to_string(),
             reason: "Normalized whitespace".to_string(),
-            timestamp: std::time::Instant::now(),
         })
     } else {
         None
@@ -401,7 +398,6 @@ fn truncate_stacktraces(content: &str, tokenizer: &Tokenizer) -> (String, Option
             tokens_after,
             stage_name: "B4_stacktrace".to_string(),
             reason: "Truncated stack traces".to_string(),
-            timestamp: std::time::Instant::now(),
         })
     } else {
         None
@@ -447,7 +443,6 @@ fn collapse_duplicate_blocks(content: &str, tokenizer: &Tokenizer) -> (String, O
             tokens_after,
             stage_name: "B5_dedup_blocks".to_string(),
             reason: "Collapsed duplicate code blocks".to_string(),
-            timestamp: std::time::Instant::now(),
         })
     } else {
         None

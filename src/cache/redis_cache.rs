@@ -161,7 +161,6 @@ impl SemanticCache for RedisSemanticCache {
                 if let Some(redis::Value::Array(ref fields)) = items.get(2) {
                     let mut score: Option<f64> = None;
                     let mut response_body: Option<Vec<u8>> = None;
-                    let mut cached_model = String::new();
                     let mut tokens_saved: usize = 0;
 
                     let mut i = 0;
@@ -188,11 +187,6 @@ impl SemanticCache for RedisSemanticCache {
                                     response_body = Some(b.clone());
                                 }
                             }
-                            "model" => {
-                                if let redis::Value::BulkString(b) = &fields[i + 1] {
-                                    cached_model = String::from_utf8_lossy(b).to_string();
-                                }
-                            }
                             "tokens_saved" => {
                                 if let redis::Value::BulkString(b) = &fields[i + 1] {
                                     let s = String::from_utf8_lossy(b);
@@ -211,7 +205,6 @@ impl SemanticCache for RedisSemanticCache {
                         if similarity >= threshold {
                             return Ok(Some(CachedResponse {
                                 response_body: body,
-                                model: cached_model,
                                 tokens_saved,
                                 similarity,
                             }));
@@ -326,8 +319,6 @@ impl SemanticCache for RedisSemanticCache {
 
         Ok(CacheStats {
             total_entries: total,
-            total_hits: 0,
-            total_misses: 0,
         })
     }
 }

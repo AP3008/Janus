@@ -98,7 +98,6 @@ pub fn dedup(
                             tokens_after,
                             stage_name: "A_dedup".to_string(),
                             reason: format!("duplicate tool_result {}", tool_use_id),
-                            timestamp: std::time::Instant::now(),
                         },
                         tool_call: ToolCallInfo {
                             tool_name,

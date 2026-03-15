@@ -1,7 +1,6 @@
 pub mod ast_prune;
 pub mod dedup;
 pub mod regex_compress;
-pub mod semantic_trim;
 
 use std::sync::Arc;
 
@@ -181,14 +180,6 @@ pub fn process(
         if config.ast_pruning {
             let (compressed, events) =
                 ast_prune::prune(&current_text, &user_query, tokenizer, config.min_lines_for_ast);
-            all_events.extend(events);
-            current_text = compressed;
-        }
-
-        // Stage D: Semantic trim (stub)
-        if config.semantic_trim {
-            let (compressed, events) =
-                semantic_trim::trim(&current_text, None, config.semantic_threshold, tokenizer);
             all_events.extend(events);
             current_text = compressed;
         }

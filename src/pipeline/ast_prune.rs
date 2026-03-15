@@ -24,7 +24,6 @@ fn detect_language(tag: &str) -> Option<&'static str> {
 
 /// A function/method/class found in parsed code
 struct FunctionInfo {
-    name: String,
     signature: String,
     start_byte: usize,
     end_byte: usize,
@@ -81,7 +80,6 @@ pub fn prune(
             tokens_after,
             stage_name: "C_ast".to_string(),
             reason: "AST-aware function body pruning".to_string(),
-            timestamp: std::time::Instant::now(),
         });
     }
 
@@ -223,7 +221,6 @@ fn collect_functions(
         let is_referenced = query_lower.contains(&name.to_lowercase());
 
         out.push(FunctionInfo {
-            name,
             signature,
             start_byte: start,
             end_byte: end,

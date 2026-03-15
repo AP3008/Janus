@@ -6,8 +6,6 @@ upstream_url = "https://api.anthropic.com"
 tool_dedup = true
 regex_structural = true
 ast_pruning = true
-semantic_trim = true
-semantic_threshold = 0.35
 min_lines_for_ast = 30
 
 [cache]
@@ -15,11 +13,6 @@ enabled = true
 redis_url = "redis://127.0.0.1:6379"
 similarity_cutoff = 0.85
 ttl_seconds = 3600
-stateless_only = true
-
-[model]
-embedding_model = "BAAI/bge-small-en-v1.5"
 
 [pricing]
 input_cost_per_1k = 0.003
-output_cost_per_1k = 0.015

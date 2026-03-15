@@ -6,7 +6,6 @@ use async_trait::async_trait;
 #[derive(Debug, Clone)]
 pub struct CachedResponse {
     pub response_body: Vec<u8>,
-    pub model: String,
     pub tokens_saved: usize,
     pub similarity: f64,
 }
@@ -42,6 +41,4 @@ pub trait SemanticCache: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct CacheStats {
     pub total_entries: u64,
-    pub total_hits: u64,
-    pub total_misses: u64,
 }
