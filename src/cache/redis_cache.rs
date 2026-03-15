@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use redis::AsyncCommands;
 use uuid::Uuid;
 
 use super::{CacheStats, CachedResponse, SemanticCache};
@@ -23,22 +22,11 @@ impl RedisSemanticCache {
             .map_err(|e| anyhow::anyhow!("Redis connection failed: {}", e))?;
 
         // Check that RediSearch module is available (required for vector search)
-        let has_search = match redis::cmd("MODULE")
-            .arg("LIST")
+        // Probe directly with FT._LIST which only succeeds if the search module is loaded
+        let has_search = redis::cmd("FT._LIST")
             .query_async::<redis::Value>(&mut conn)
             .await
-        {
-            Ok(redis::Value::Array(ref mods)) => {
-                format!("{:?}", mods).to_lowercase().contains("search")
-            }
-            _ => {
-                // MODULE LIST unavailable; probe with FT._LIST
-                redis::cmd("FT._LIST")
-                    .query_async::<redis::Value>(&mut conn)
-                    .await
-                    .is_ok()
-            }
-        };
+            .is_ok();
 
         if !has_search {
             return Err(anyhow::anyhow!(
@@ -271,7 +259,7 @@ impl SemanticCache for RedisSemanticCache {
                     ("tokens_saved", tokens_saved.to_string().as_bytes()),
                 ],
             )
-            .expire(&key, ttl_seconds as i64)
+            .expire(&key, i64::try_from(ttl_seconds).unwrap_or(i64::MAX))
             .query_async::<()>(&mut conn)
             .await?;
 
@@ -281,16 +269,32 @@ impl SemanticCache for RedisSemanticCache {
     async fn flush(&self) -> anyhow::Result<u64> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
 
-        // Find and delete all janus:cache:* keys
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("janus:cache:*")
-            .query_async(&mut conn)
-            .await
-            .unwrap_or_default();
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        let mut count: u64 = 0;
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("janus:cache:*")
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await?;
 
-        let count = keys.len() as u64;
-        for key in &keys {
-            let _: () = conn.del(key).await?;
+            if !keys.is_empty() {
+                // Batch delete all keys at once
+                let _: () = redis::cmd("DEL")
+                    .arg(&keys)
+                    .query_async(&mut conn)
+                    .await?;
+                count += keys.len() as u64;
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
         }
 
         Ok(count)
@@ -299,14 +303,29 @@ impl SemanticCache for RedisSemanticCache {
     async fn stats(&self) -> anyhow::Result<CacheStats> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
 
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("janus:cache:*")
-            .query_async(&mut conn)
-            .await
-            .unwrap_or_default();
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        let mut total: u64 = 0;
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("janus:cache:*")
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await?;
+
+            total += keys.len() as u64;
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
 
         Ok(CacheStats {
-            total_entries: keys.len() as u64,
+            total_entries: total,
             total_hits: 0,
             total_misses: 0,
         })

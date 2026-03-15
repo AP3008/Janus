@@ -133,16 +133,23 @@ impl TuiApp {
 
         // Update session stats
         self.stats.total_requests += 1;
-        self.stats.total_tokens_original += update.tokens_original as u64;
-        self.stats.total_tokens_compressed += update.tokens_compressed as u64;
         match &update.cache_status {
             CacheStatus::Hit { .. } => {
                 self.stats.cache_hits += 1;
-                // Cache hit saves all original tokens (no upstream call needed)
+                // Cache hit saves all original tokens (no upstream call needed).
+                // Don't add to original/compressed accumulators to avoid double-counting
+                // in tokens_saved() which computes original - compressed.
                 self.stats.cache_tokens_saved += update.tokens_original as u64;
             }
-            CacheStatus::Miss => self.stats.cache_misses += 1,
-            CacheStatus::Skipped => {}
+            CacheStatus::Miss => {
+                self.stats.cache_misses += 1;
+                self.stats.total_tokens_original += update.tokens_original as u64;
+                self.stats.total_tokens_compressed += update.tokens_compressed as u64;
+            }
+            CacheStatus::Skipped => {
+                self.stats.total_tokens_original += update.tokens_original as u64;
+                self.stats.total_tokens_compressed += update.tokens_compressed as u64;
+            }
         }
 
         // Update request log

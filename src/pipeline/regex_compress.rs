@@ -166,8 +166,9 @@ fn strip_comments(content: &str, tokenizer: &Tokenizer) -> (String, Option<Compr
                 result.push('\n');
                 continue;
             }
-            // Inline comment: keep code before #
-            let code_part = &line[..line.len() - (trimmed.len() - pos)];
+            // Inline comment: find the comment position in the original line
+            let leading_ws = line.len() - line.trim_start().len();
+            let code_part = &line[..leading_ws + pos];
             result.push_str(code_part.trim_end());
             result.push('\n');
             continue;
@@ -179,7 +180,9 @@ fn strip_comments(content: &str, tokenizer: &Tokenizer) -> (String, Option<Compr
                 result.push('\n');
                 continue;
             }
-            let code_part = &line[..line.len() - (trimmed.len() - pos)];
+            // Find the comment position in the original line
+            let leading_ws = line.len() - line.trim_start().len();
+            let code_part = &line[..leading_ws + pos];
             result.push_str(code_part.trim_end());
             result.push('\n');
             continue;
@@ -253,30 +256,35 @@ fn find_double_slash_comment(line: &str) -> Option<usize> {
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut escaped = false;
-    let bytes = line.as_bytes();
+    let mut prev_char: Option<char> = None;
 
-    for i in 0..bytes.len() {
+    for (i, ch) in line.char_indices() {
         if escaped {
             escaped = false;
+            prev_char = Some(ch);
             continue;
         }
-        if bytes[i] == b'\\' {
+        if ch == '\\' {
             escaped = true;
+            prev_char = Some(ch);
             continue;
         }
-        if bytes[i] == b'\'' && !in_double_quote {
+        if ch == '\'' && !in_double_quote {
             in_single_quote = !in_single_quote;
-        } else if bytes[i] == b'"' && !in_single_quote {
+        } else if ch == '"' && !in_single_quote {
             in_double_quote = !in_double_quote;
-        } else if bytes[i] == b'/' && !in_single_quote && !in_double_quote {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+        } else if ch == '/' && !in_single_quote && !in_double_quote {
+            // Look ahead for another /
+            if line[i..].starts_with("//") {
                 // Check it's not preceded by : (URL like http://)
-                if i > 0 && bytes[i - 1] == b':' {
+                if prev_char == Some(':') {
+                    prev_char = Some(ch);
                     continue;
                 }
                 return Some(i);
             }
         }
+        prev_char = Some(ch);
     }
     None
 }

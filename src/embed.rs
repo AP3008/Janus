@@ -1,6 +1,5 @@
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Wrapper around fastembed TextEmbedding for generating embeddings
 pub struct Embedder {
@@ -23,8 +22,8 @@ impl Embedder {
         let model = self.model.clone();
         let text = text.to_string();
         let result = tokio::task::spawn_blocking(move || {
-            let mut model = model.blocking_lock();
-            model.embed(vec![text], None)
+            let mut model = model.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+            model.embed(vec![text], None).map_err(anyhow::Error::from)
         })
         .await??;
 

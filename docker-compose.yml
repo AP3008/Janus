@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   janus:
     build: .
@@ -22,7 +20,7 @@ services:
     image: redis/redis-stack:latest
     ports:
       - "6379:6379"
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     volumes:
       - redis-data:/data
     healthcheck:

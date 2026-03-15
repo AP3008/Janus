@@ -15,7 +15,7 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy main.rs to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release 2>/dev/null || true
+RUN cargo build --release || true
 
 # Copy real source
 COPY src/ src/
@@ -32,11 +32,11 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/janus /usr/local/bin/janus
 COPY --from=builder /app/janus.toml /etc/janus/janus.toml
-COPY --from=builder /app/benches/ /app/benches/
 
 EXPOSE 8080
 

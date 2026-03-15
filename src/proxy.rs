@@ -175,6 +175,8 @@ async fn proxy_handler(
     let session_data = state.session_store.get_or_create(&session_id);
 
     // Run compression pipeline (with panic recovery to avoid crashing the proxy)
+    // Clone body_json so we can fall back to the original if the pipeline panics
+    let original_body_json = body_json.clone();
     let pipeline_start = Instant::now();
     let pipeline_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::pipeline::process(
@@ -187,6 +189,8 @@ async fn proxy_handler(
         Ok(result) => result,
         Err(e) => {
             tracing::error!("Pipeline panicked: {:?}", e);
+            // Restore the original unmodified body to avoid sending corrupted data upstream
+            body_json = original_body_json;
             crate::pipeline::PipelineResult::default()
         }
     };

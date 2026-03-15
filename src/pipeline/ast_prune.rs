@@ -26,12 +26,8 @@ fn detect_language(tag: &str) -> Option<&'static str> {
 struct FunctionInfo {
     name: String,
     signature: String,
-    body_start_byte: usize,
-    body_end_byte: usize,
     start_byte: usize,
     end_byte: usize,
-    first_lines: String,  // first 3 lines of body
-    last_lines: String,   // last 3 lines of body
     body_token_count: usize,
     is_referenced: bool,
 }
@@ -127,17 +123,26 @@ fn prune_code(
         return None;
     }
 
-    // If no functions are prunable, skip
-    if functions.iter().all(|f| f.is_referenced) {
-        return None;
-    }
-
     // Build pruned output by replacing unreferenced function bodies
     let mut result = code.to_string();
     // Process in reverse order to maintain byte offsets
     functions.sort_by(|a, b| b.start_byte.cmp(&a.start_byte));
 
+    // Filter out functions whose ranges are contained within another function's range
+    // (e.g., methods inside impl blocks) to avoid overlapping replacements
+    let mut filtered: Vec<&FunctionInfo> = Vec::new();
     for func in &functions {
+        let dominated = functions.iter().any(|other| {
+            std::ptr::eq(func, other) == false
+                && other.start_byte <= func.start_byte
+                && func.end_byte <= other.end_byte
+        });
+        if !dominated {
+            filtered.push(func);
+        }
+    }
+
+    for func in &filtered {
         if func.is_referenced {
             continue;
         }
@@ -145,8 +150,6 @@ fn prune_code(
         // Build stub replacement
         let stub = build_stub(
             &func.signature,
-            &func.first_lines,
-            &func.last_lines,
             func.body_token_count,
             lang,
         );
@@ -192,10 +195,8 @@ fn collect_functions(
             continue;
         }
 
-        // Get full text
         let start = child.start_byte();
         let end = child.end_byte();
-        let full_text = &source[start..end];
 
         // Find the body node
         let body_node = find_body_node(child);
@@ -209,22 +210,12 @@ fn collect_functions(
         };
 
         let body_text = &source[body_start..body_end];
-        let body_lines: Vec<&str> = body_text.lines().collect();
+        let body_line_count = body_text.lines().count();
 
         // Only prune if body is substantial (3+ lines)
-        if body_lines.len() < 3 {
+        if body_line_count < 3 {
             continue;
         }
-
-        let first_lines = body_lines.iter().take(3).copied().collect::<Vec<_>>().join("\n");
-        let last_lines = body_lines
-            .iter()
-            .rev()
-            .take(3)
-            .copied()
-            .collect::<Vec<_>>();
-        let last_lines: Vec<&str> = last_lines.into_iter().rev().collect();
-        let last_lines = last_lines.join("\n");
 
         let body_token_count = tokenizer.count_tokens(body_text);
 
@@ -234,12 +225,8 @@ fn collect_functions(
         out.push(FunctionInfo {
             name,
             signature,
-            body_start_byte: body_start,
-            body_end_byte: body_end,
             start_byte: start,
             end_byte: end,
-            first_lines,
-            last_lines,
             body_token_count,
             is_referenced,
         });
@@ -284,8 +271,6 @@ fn find_body_node(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
 /// Build a stub replacement for a pruned function
 fn build_stub(
     signature: &str,
-    first_lines: &str,
-    last_lines: &str,
     body_tokens: usize,
     lang: &str,
 ) -> String {

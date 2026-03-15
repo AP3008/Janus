@@ -55,10 +55,9 @@ pub struct CacheConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelConfig {
+    /// Informational only — the embedding model is currently hardcoded in embed.rs
     #[serde(default = "default_embedding_model")]
     pub embedding_model: String,
-    #[serde(default = "default_embedding_cache")]
-    pub embedding_cache: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,10 +112,6 @@ fn default_embedding_model() -> String {
     "BAAI/bge-small-en-v1.5".to_string()
 }
 
-fn default_embedding_cache() -> String {
-    "~/.janus/models".to_string()
-}
-
 fn default_input_cost() -> f64 {
     0.003
 }
@@ -160,7 +155,6 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             embedding_model: default_embedding_model(),
-            embedding_cache: default_embedding_cache(),
         }
     }
 }
