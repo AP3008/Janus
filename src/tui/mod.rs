@@ -37,6 +37,12 @@ pub struct RequestEntry {
     pub error_status: Option<(u16, String)>,
 }
 
+/// Commands sent from TUI back to main for async operations
+#[derive(Debug)]
+pub enum TuiCommand {
+    FlushCache,
+}
+
 /// TUI application state
 pub struct TuiApp {
     pub should_quit: bool,
@@ -52,10 +58,18 @@ pub struct TuiApp {
     pub input_cost_per_1k: f64,
     pub tick_count: u64,
     pub last_error: Option<(u16, String, Instant)>,
+    pub cmd_tx: mpsc::UnboundedSender<TuiCommand>,
+    pub last_request_time: Option<Instant>,
+    pub idle_flush_sent: bool,
 }
 
 impl TuiApp {
-    pub fn new(upstream_url: String, listen_addr: String, input_cost_per_1k: f64) -> Self {
+    pub fn new(
+        upstream_url: String,
+        listen_addr: String,
+        input_cost_per_1k: f64,
+        cmd_tx: mpsc::UnboundedSender<TuiCommand>,
+    ) -> Self {
         Self {
             should_quit: false,
             paused: false,
@@ -70,6 +84,9 @@ impl TuiApp {
             input_cost_per_1k,
             tick_count: 0,
             last_error: None,
+            cmd_tx,
+            last_request_time: None,
+            idle_flush_sent: false,
         }
     }
 
@@ -86,14 +103,15 @@ impl TuiApp {
                 self.stage_breakdown.clear();
             }
             KeyCode::Char('f') => {
-                // Cache flush would be handled via a command channel back to proxy
-                // For now just log
+                let _ = self.cmd_tx.send(TuiCommand::FlushCache);
             }
             KeyCode::Up => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                self.log_scroll = self.log_scroll.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.scroll_offset += 1;
+                if self.log_scroll < self.request_log.len().saturating_sub(1) {
+                    self.log_scroll += 1;
+                }
             }
             _ => {}
         }
@@ -103,6 +121,10 @@ impl TuiApp {
         if self.paused {
             return;
         }
+
+        // Track request timing for idle flush
+        self.last_request_time = Some(Instant::now());
+        self.idle_flush_sent = false;
 
         // Update session stats
         self.stats.total_requests += 1;
@@ -173,6 +195,7 @@ pub fn run_tui(
     upstream_url: String,
     listen_addr: String,
     input_cost_per_1k: f64,
+    cmd_tx: mpsc::UnboundedSender<TuiCommand>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -180,7 +203,7 @@ pub fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = TuiApp::new(upstream_url, listen_addr, input_cost_per_1k);
+    let mut app = TuiApp::new(upstream_url, listen_addr, input_cost_per_1k, cmd_tx);
 
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -209,6 +232,14 @@ pub fn run_tui(
         // Check for proxy updates (non-blocking)
         while let Ok(update) = rx.try_recv() {
             app.on_proxy_event(update);
+        }
+
+        // Idle auto-flush: if no requests for 120s, flush cache
+        if let Some(last) = app.last_request_time {
+            if !app.idle_flush_sent && last.elapsed() > Duration::from_secs(120) {
+                let _ = app.cmd_tx.send(TuiCommand::FlushCache);
+                app.idle_flush_sent = true;
+            }
         }
     }
 

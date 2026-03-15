@@ -77,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
 
             // Create TUI channel
             let (tui_tx, tui_rx) = mpsc::unbounded_channel::<tui::ProxyUpdate>();
+            // Create command channel (TUI -> main for async ops like cache flush)
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<tui::TuiCommand>();
 
             if no_tui {
                 // Initialize tracing for non-TUI mode
@@ -164,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
                 let upstream = upstream_url.clone();
                 let listen = listen_addr.clone();
                 Some(std::thread::spawn(move || {
-                    if let Err(e) = tui::run_tui(tui_rx, upstream, listen, input_cost) {
+                    if let Err(e) = tui::run_tui(tui_rx, upstream, listen, input_cost, cmd_tx) {
                         eprintln!("TUI error: {}", e);
                     }
                 }))
@@ -178,10 +180,33 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Janus listening on {}", listen_addr);
 
             if no_tui {
+                drop(cmd_rx);
                 axum::serve(listener, app).await?;
             } else {
-                // Run server until TUI quits
+                // Run server until TUI quits, handling cache flush commands
+                let state_for_cmd = state_for_shutdown.clone();
                 let server = axum::serve(listener, app);
+
+                // Spawn command handler for TUI commands (cache flush, etc.)
+                let cmd_handle = tokio::spawn(async move {
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        match cmd {
+                            tui::TuiCommand::FlushCache => {
+                                if let Some(ref cache) = state_for_cmd.cache {
+                                    match cache.flush().await {
+                                        Ok(count) => {
+                                            tracing::info!(count, "Cache flushed via TUI command");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "Cache flush failed");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+
                 tokio::select! {
                     result = server => {
                         result?;
@@ -194,6 +219,8 @@ async fn main() -> anyhow::Result<()> {
                         // TUI quit, exit gracefully
                     }
                 }
+
+                cmd_handle.abort();
             }
 
             // Flush cache on shutdown for session isolation
