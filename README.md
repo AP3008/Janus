@@ -1,5 +1,7 @@
-# Janus
-
+<h1 align="center">Janus</h1>
+<img src="./assets/janus.jpg" align="center"></img>
+<div align="center">
+  
 [![Rust](https://img.shields.io/github/languages/top/AP3008/Janus)](https://github.com/AP3008/Janus)
 [![Stars](https://img.shields.io/github/stars/AP3008/Janus)](https://github.com/AP3008/Janus/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/AP3008/Janus)](https://github.com/AP3008/Janus/commits)
@@ -7,9 +9,11 @@
 
 An LLM token compression proxy for the Anthropic API. Janus sits between your application and Claude, intelligently compressing requests to reduce token usage and cost without sacrificing context quality.
 
+</div>
+
 ## Inspiration
 
-<!-- TODO: Add your inspiration here -->
+I wanted to build something that runs locally, losslessly, and efficiently that significantly decreases the token usage, to maximize utility out of coding agents. 
 
 ## What It Does
 
