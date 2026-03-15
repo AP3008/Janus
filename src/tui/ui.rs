@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Bar, BarChart, BarGroup, Block, Borders, Gauge, Paragraph, Sparkline, Wrap},
+    widgets::{Bar, BarChart, BarGroup, Block, Borders, Gauge, Paragraph, Wrap},
 };
 
 use super::TuiApp;
@@ -135,22 +135,57 @@ fn draw_welcome(frame: &mut Frame, app: &TuiApp) {
 // ── active state ─────────────────────────────────────────────────────────
 
 fn draw_active(frame: &mut Frame, app: &TuiApp) {
+    let show_error = app.last_error.as_ref().map_or(false, |(_, _, t)| {
+        t.elapsed() < std::time::Duration::from_secs(30)
+    });
+    let error_height = if show_error { 2 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(5), // Hero savings
-            Constraint::Min(10),  // Main panels
-            Constraint::Length(7), // Sparklines
-            Constraint::Length(1), // Footer
+            Constraint::Length(3),            // Header
+            Constraint::Length(error_height), // Error bar (conditional)
+            Constraint::Length(5),            // Hero savings
+            Constraint::Min(10),             // Main panels
+            Constraint::Length(10),           // Request log
+            Constraint::Length(1),            // Footer
         ])
         .split(frame.area());
 
     draw_header(frame, chunks[0], app);
-    draw_hero_savings(frame, chunks[1], app);
-    draw_main_panels(frame, chunks[2], app);
-    draw_sparklines(frame, chunks[3], app);
-    draw_footer(frame, chunks[4]);
+    if show_error {
+        draw_error_bar(frame, chunks[1], app);
+    }
+    draw_hero_savings(frame, chunks[2], app);
+    draw_main_panels(frame, chunks[3], app);
+    draw_request_log(frame, chunks[4], app);
+    draw_footer(frame, chunks[5]);
+}
+
+// ── error bar ────────────────────────────────────────────────────────────
+
+fn draw_error_bar(frame: &mut Frame, area: Rect, app: &TuiApp) {
+    if let Some((code, ref msg, ref when)) = app.last_error {
+        let ago = when.elapsed().as_secs();
+        let ago_str = if ago < 60 {
+            format!("{}s ago", ago)
+        } else {
+            format!("{}m ago", ago / 60)
+        };
+
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" ! {} ({}) ", msg, code),
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", ago_str), Style::default().fg(Color::DarkGray)),
+        ]);
+
+        frame.render_widget(Paragraph::new(line), area);
+    }
 }
 
 // ── header (3 lines) ─────────────────────────────────────────────────────
@@ -578,60 +613,96 @@ fn draw_tool_calls(frame: &mut Frame, area: Rect, app: &TuiApp) {
     );
 }
 
-// ── sparklines ───────────────────────────────────────────────────────────
+// ── request log ──────────────────────────────────────────────────────────
 
-fn draw_sparklines(frame: &mut Frame, area: Rect, app: &TuiApp) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+fn draw_request_log(frame: &mut Frame, area: Rect, app: &TuiApp) {
+    let title = format!(" Request Log ({}) ", app.request_log.len());
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
 
-    let orig_data = app.token_history_original.as_vec();
-    let comp_data = app.token_history_compressed.as_vec();
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    // Shared max for comparable scaling
-    let shared_max = orig_data
-        .iter()
-        .chain(comp_data.iter())
-        .copied()
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    if app.request_log.is_empty() {
+        let text = Paragraph::new(Line::from(Span::styled(
+            "No requests yet",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(Alignment::Center);
+        frame.render_widget(text, inner);
+        return;
+    }
 
-    let orig_sparkline = Sparkline::default()
-        .block(
-            Block::default()
-                .title(Span::styled(
-                    " Original Tokens (per request) ",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .borders(Borders::LEFT | Borders::TOP | Borders::RIGHT)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .data(&orig_data)
-        .max(shared_max)
-        .style(Style::default().fg(Color::Blue));
+    let visible_height = inner.height as usize;
+    let total = app.request_log.len();
+    let scroll = app.log_scroll.min(total.saturating_sub(visible_height));
 
-    let comp_sparkline = Sparkline::default()
-        .block(
-            Block::default()
-                .title(Span::styled(
-                    " After Compression ",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ))
-                .borders(Borders::LEFT | Borders::BOTTOM | Borders::RIGHT)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .data(&comp_data)
-        .max(shared_max)
-        .style(Style::default().fg(Color::Green));
+    let mut lines: Vec<Line> = Vec::new();
+    for entry in app.request_log.iter().skip(scroll).take(visible_height) {
+        let num = Span::styled(
+            format!(" #{:03}  ", entry.request_number),
+            Style::default().fg(Color::DarkGray),
+        );
 
-    frame.render_widget(orig_sparkline, chunks[0]);
-    frame.render_widget(comp_sparkline, chunks[1]);
+        if let Some((code, ref msg)) = entry.error_status {
+            lines.push(Line::from(vec![
+                num,
+                Span::styled(
+                    format!("ERROR {}  ", code),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(msg.clone(), Style::default().fg(Color::Red)),
+            ]));
+        } else if matches!(entry.cache_status, crate::metrics::CacheStatus::Hit { .. }) {
+            lines.push(Line::from(vec![
+                num,
+                Span::styled(
+                    "CACHE HIT   ",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "{} → 0",
+                    format_number(entry.tokens_original as u64),
+                )),
+                Span::styled("      100% saved", Style::default().fg(Color::Green)),
+            ]));
+        } else {
+            let pct = if entry.tokens_original > 0 {
+                entry.tokens_original.saturating_sub(entry.tokens_compressed) as f64
+                    / entry.tokens_original as f64
+                    * 100.0
+            } else {
+                0.0
+            };
+            let status_label = if pct > 0.0 { "COMPRESSED  " } else { "FORWARDED   " };
+            let status_color = if pct > 0.0 { Color::Cyan } else { Color::DarkGray };
+            lines.push(Line::from(vec![
+                num,
+                Span::styled(
+                    status_label,
+                    Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "{} → {}",
+                    format_number(entry.tokens_original as u64),
+                    format_number(entry.tokens_compressed as u64),
+                )),
+                Span::styled(
+                    format!("  {:>5.0}% saved", pct),
+                    Style::default().fg(savings_color(pct / 100.0)),
+                ),
+            ]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ── footer ───────────────────────────────────────────────────────────────

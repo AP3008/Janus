@@ -1,4 +1,3 @@
-pub mod sparkline;
 pub mod ui;
 
 use crossterm::{
@@ -8,13 +7,12 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::metrics::{
     CacheStatus, CompressionEvent, SessionStats, ToolCallInfo,
 };
-use sparkline::TokenHistory;
 
 /// Update sent from the proxy to the TUI
 #[derive(Debug, Clone)]
@@ -26,6 +24,17 @@ pub struct ProxyUpdate {
     pub cache_status: CacheStatus,
     pub pipeline_duration: Duration,
     pub upstream_duration: Option<Duration>,
+    pub error_status: Option<(u16, String)>,
+}
+
+/// Entry in the request history log
+#[derive(Debug, Clone)]
+pub struct RequestEntry {
+    pub request_number: u64,
+    pub tokens_original: usize,
+    pub tokens_compressed: usize,
+    pub cache_status: CacheStatus,
+    pub error_status: Option<(u16, String)>,
 }
 
 /// TUI application state
@@ -34,14 +43,15 @@ pub struct TuiApp {
     pub paused: bool,
     pub scroll_offset: usize,
     pub stats: SessionStats,
-    pub token_history_original: TokenHistory,
-    pub token_history_compressed: TokenHistory,
+    pub request_log: Vec<RequestEntry>,
+    pub log_scroll: usize,
     pub last_request: Option<ProxyUpdate>,
     pub stage_breakdown: Vec<(String, usize)>,
     pub upstream_url: String,
     pub listen_addr: String,
     pub input_cost_per_1k: f64,
     pub tick_count: u64,
+    pub last_error: Option<(u16, String, Instant)>,
 }
 
 impl TuiApp {
@@ -51,14 +61,15 @@ impl TuiApp {
             paused: false,
             scroll_offset: 0,
             stats: SessionStats::default(),
-            token_history_original: TokenHistory::new(30),
-            token_history_compressed: TokenHistory::new(30),
+            request_log: Vec::new(),
+            log_scroll: 0,
             last_request: None,
             stage_breakdown: Vec::new(),
             upstream_url,
             listen_addr,
             input_cost_per_1k,
             tick_count: 0,
+            last_error: None,
         }
     }
 
@@ -68,9 +79,10 @@ impl TuiApp {
             KeyCode::Char('p') => self.paused = !self.paused,
             KeyCode::Char('r') => {
                 self.stats = SessionStats::default();
-                self.token_history_original = TokenHistory::new(30);
-                self.token_history_compressed = TokenHistory::new(30);
+                self.request_log.clear();
+                self.log_scroll = 0;
                 self.last_request = None;
+                self.last_error = None;
                 self.stage_breakdown.clear();
             }
             KeyCode::Char('f') => {
@@ -106,11 +118,19 @@ impl TuiApp {
             CacheStatus::Skipped => {}
         }
 
-        // Update sparklines
-        self.token_history_original
-            .push(update.tokens_original as u64);
-        self.token_history_compressed
-            .push(update.tokens_compressed as u64);
+        // Update request log
+        self.request_log.push(RequestEntry {
+            request_number: self.stats.total_requests,
+            tokens_original: update.tokens_original,
+            tokens_compressed: update.tokens_compressed,
+            cache_status: update.cache_status.clone(),
+            error_status: update.error_status.clone(),
+        });
+        // Auto-scroll to bottom
+        let visible = 8usize; // approximate visible rows
+        if self.request_log.len() > visible {
+            self.log_scroll = self.request_log.len() - visible;
+        }
 
         // Update stage breakdown
         self.stage_breakdown.clear();
@@ -137,6 +157,12 @@ impl TuiApp {
         }
 
         self.scroll_offset = 0;
+
+        // Track errors
+        if let Some((code, ref msg)) = update.error_status {
+            self.last_error = Some((code, msg.clone(), Instant::now()));
+        }
+
         self.last_request = Some(update);
     }
 }

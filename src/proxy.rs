@@ -59,6 +59,16 @@ async fn proxy_handler(
     // Parse body for token counting and compression
     let mut body_json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
         tracing::error!(error = %e, "Failed to parse request body as JSON");
+        let _ = state.tui_tx.send(ProxyUpdate {
+            tokens_original: 0,
+            tokens_compressed: 0,
+            events: Vec::new(),
+            tool_calls: Vec::new(),
+            cache_status: CacheStatus::Skipped,
+            pipeline_duration: std::time::Duration::ZERO,
+            upstream_duration: None,
+            error_status: Some((400, "Bad request - invalid JSON body".to_string())),
+        });
         StatusCode::BAD_REQUEST
     })?;
 
@@ -110,6 +120,7 @@ async fn proxy_handler(
                                     },
                                     pipeline_duration: std::time::Duration::ZERO,
                                     upstream_duration: None,
+                                    error_status: None,
                                 });
 
                                 let (body_bytes, content_type) = if is_streaming {
@@ -227,6 +238,16 @@ async fn proxy_handler(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to forward request to upstream");
+            let _ = state.tui_tx.send(ProxyUpdate {
+                tokens_original: tokens_before,
+                tokens_compressed: tokens_after,
+                events: pipeline_result.events.clone(),
+                tool_calls: pipeline_result.tool_calls.clone(),
+                cache_status: CacheStatus::Skipped,
+                pipeline_duration,
+                upstream_duration: None,
+                error_status: Some((502, "Failed to connect to upstream API".to_string())),
+            });
             StatusCode::BAD_GATEWAY
         })?;
     let upstream_duration = upstream_start.elapsed();
@@ -268,6 +289,11 @@ async fn proxy_handler(
             },
             pipeline_duration,
             upstream_duration: Some(upstream_duration),
+            error_status: if !status.is_success() {
+                Some((status.as_u16(), friendly_error_message(status)))
+            } else {
+                None
+            },
         });
 
         if should_cache {
@@ -430,6 +456,11 @@ async fn proxy_handler(
         cache_status,
         pipeline_duration,
         upstream_duration: Some(upstream_duration),
+        error_status: if !status.is_success() {
+            Some((status.as_u16(), friendly_error_message(status)))
+        } else {
+            None
+        },
     });
 
     let mut response = Response::new(Body::from(response_bytes));
@@ -490,6 +521,18 @@ fn response_has_thinking(response_body: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn friendly_error_message(status: StatusCode) -> String {
+    match status.as_u16() {
+        400 => "Bad request - check your prompt".to_string(),
+        401 => "Unauthorized - check API key".to_string(),
+        403 => "Forbidden - API key lacks permission".to_string(),
+        429 => "Rate limited - too many requests".to_string(),
+        500 => "Upstream server error".to_string(),
+        529 => "API overloaded".to_string(),
+        code => format!("Upstream error ({})", code),
+    }
 }
 
 async fn health_handler(
