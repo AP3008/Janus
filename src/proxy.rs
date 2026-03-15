@@ -198,6 +198,16 @@ async fn proxy_handler(
         }
     }
 
+    // Register this request as in-flight EARLY so duplicates arriving during
+    // the slow embedding/Redis/upstream phases will wait instead of going upstream
+    let mut inflight_tx = if let Some(ref key) = inmem_key {
+        let (tx, rx) = watch::channel(false);
+        state.inflight.insert(key.clone(), rx);
+        Some(tx)
+    } else {
+        None
+    };
+
     if state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
             if !user_text_for_cache.is_empty() {
@@ -213,6 +223,11 @@ async fn proxy_handler(
                                     tokens_saved = cached.tokens_saved,
                                     "Cache HIT"
                                 );
+
+                                // Clean up inflight since we're returning a cached response
+                                if let Some(ref key) = inmem_key {
+                                    state.inflight.remove(key);
+                                }
 
                                 let _ = state.tui_tx.send(ProxyUpdate {
                                     tokens_original: tokens_before,
@@ -269,15 +284,6 @@ async fn proxy_handler(
             }
         }
     }
-
-    // Register this request as in-flight so duplicates can wait for it
-    let mut inflight_tx = if let Some(ref key) = inmem_key {
-        let (tx, rx) = watch::channel(false);
-        state.inflight.insert(key.clone(), rx);
-        Some(tx)
-    } else {
-        None
-    };
 
     // Derive session ID for dedup
     let session_id = if let Some(messages) = body_json.get("messages").and_then(|m| m.as_array()) {
