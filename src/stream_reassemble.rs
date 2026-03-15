@@ -85,6 +85,8 @@ pub fn reconstruct_response(sse_data: &str) -> Option<Vec<u8>> {
     let mut json_accum: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut thinking_accum: std::collections::HashMap<usize, String> =
         std::collections::HashMap::new();
+    let mut signature_accum: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
 
     for line in sse_data.lines() {
         let line = line.trim();
@@ -147,6 +149,11 @@ pub fn reconstruct_response(sse_data: &str) -> Option<Vec<u8>> {
                                 thinking_accum.entry(index).or_default().push_str(text);
                             }
                         }
+                        "signature_delta" => {
+                            if let Some(sig) = delta.get("signature").and_then(|t| t.as_str()) {
+                                signature_accum.entry(index).or_default().push_str(sig);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -195,8 +202,10 @@ pub fn reconstruct_response(sse_data: &str) -> Option<Vec<u8>> {
                 }
             }
             "thinking" => {
-                if let Some(text) = thinking_accum.get(&index) {
-                    block["thinking"] = serde_json::Value::String(text.clone());
+                let text = thinking_accum.get(&index).cloned().unwrap_or_default();
+                block["thinking"] = serde_json::Value::String(text);
+                if let Some(sig) = signature_accum.get(&index) {
+                    block["signature"] = serde_json::Value::String(sig.clone());
                 }
             }
             _ => {}
@@ -274,6 +283,7 @@ pub fn json_to_sse(response_json: &[u8]) -> Option<Vec<u8>> {
                         "input": {}
                     })
                 }
+                "thinking" => serde_json::json!({"type": "thinking", "thinking": ""}),
                 _ => block.clone(),
             };
             write_sse_event(
@@ -313,6 +323,33 @@ pub fn json_to_sse(response_json: &[u8]) -> Option<Vec<u8>> {
                                     "type": "content_block_delta",
                                     "index": index,
                                     "delta": {"type": "input_json_delta", "partial_json": json_str}
+                                }),
+                            );
+                        }
+                    }
+                }
+                "thinking" => {
+                    let thinking = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                    if !thinking.is_empty() {
+                        write_sse_event(
+                            &mut out,
+                            "content_block_delta",
+                            &serde_json::json!({
+                                "type": "content_block_delta",
+                                "index": index,
+                                "delta": {"type": "thinking_delta", "thinking": thinking}
+                            }),
+                        );
+                    }
+                    if let Some(sig) = block.get("signature").and_then(|s| s.as_str()) {
+                        if !sig.is_empty() {
+                            write_sse_event(
+                                &mut out,
+                                "content_block_delta",
+                                &serde_json::json!({
+                                    "type": "content_block_delta",
+                                    "index": index,
+                                    "delta": {"type": "signature_delta", "signature": sig}
                                 }),
                             );
                         }
@@ -474,6 +511,84 @@ data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_d
             "Ottawa is the capital of Canada."
         );
         assert_eq!(reconstructed_json["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn test_thinking_response() {
+        let sse = "\
+event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_03\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"test\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\
+\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" about this.\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig123\"}}\n\
+\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\
+\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"The answer is 42.\"}}\n\
+\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":1}\n\
+\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":30}}\n\
+\n\
+event: message_stop\n\
+data: {\"type\":\"message_stop\"}\n";
+
+        let result = reconstruct_response(sse);
+        assert!(result.is_some());
+
+        let json: serde_json::Value = serde_json::from_slice(&result.unwrap()).unwrap();
+        assert_eq!(json["content"][0]["type"], "thinking");
+        assert_eq!(json["content"][0]["thinking"], "Let me think about this.");
+        assert_eq!(json["content"][0]["signature"], "sig123");
+        assert_eq!(json["content"][1]["type"], "text");
+        assert_eq!(json["content"][1]["text"], "The answer is 42.");
+    }
+
+    #[test]
+    fn test_thinking_roundtrip() {
+        let json = serde_json::json!({
+            "id": "msg_03",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Let me think.", "signature": "sig456"},
+                {"type": "text", "text": "The answer."}
+            ],
+            "model": "test",
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 10, "output_tokens": 20}
+        });
+        let json_bytes = serde_json::to_vec(&json).unwrap();
+
+        let sse_bytes = json_to_sse(&json_bytes).unwrap();
+        let sse_str = String::from_utf8(sse_bytes).unwrap();
+
+        assert!(sse_str.contains("thinking_delta"));
+        assert!(sse_str.contains("signature_delta"));
+
+        let reconstructed = reconstruct_response(&sse_str).unwrap();
+        let rjson: serde_json::Value = serde_json::from_slice(&reconstructed).unwrap();
+        assert_eq!(rjson["content"][0]["type"], "thinking");
+        assert_eq!(rjson["content"][0]["thinking"], "Let me think.");
+        assert_eq!(rjson["content"][0]["signature"], "sig456");
+        assert_eq!(rjson["content"][1]["text"], "The answer.");
     }
 
     #[test]

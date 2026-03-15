@@ -296,6 +296,8 @@ async fn proxy_handler(
                         {
                             if response_has_tool_use(&response_bytes) {
                                 tracing::debug!("Response contains tool_use, skipping cache");
+                            } else if response_has_thinking(&response_bytes) {
+                                tracing::debug!("Response contains thinking blocks, skipping cache");
                             } else if let (Some(cache), Some(embedder)) =
                                 (&state_bg.cache, &state_bg.embedder)
                             {
@@ -379,7 +381,7 @@ async fn proxy_handler(
     // Store in cache if successful
     let cache_status = if status == StatusCode::OK && state.config.cache.enabled {
         if let (Some(cache), Some(embedder)) = (&state.cache, &state.embedder) {
-            if !user_text_for_cache.is_empty() && !response_has_tool_use(&response_bytes) {
+            if !user_text_for_cache.is_empty() && !response_has_tool_use(&response_bytes) && !response_has_thinking(&response_bytes) {
                 match embedder.embed_one(&user_text_for_cache).await {
                     Ok(embedding) => {
                         if let Err(e) = cache
@@ -471,6 +473,19 @@ fn response_has_tool_use(response_body: &[u8]) -> bool {
         if let Some(content) = json.get("content").and_then(|c| c.as_array()) {
             return content.iter().any(|block| {
                 block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+            });
+        }
+    }
+    false
+}
+
+/// Check if an API response contains thinking blocks (should not be cached —
+/// thinking blocks require a `signature` field that is lost during SSE reconstruction)
+fn response_has_thinking(response_body: &[u8]) -> bool {
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(response_body) {
+        if let Some(content) = json.get("content").and_then(|c| c.as_array()) {
+            return content.iter().any(|block| {
+                block.get("type").and_then(|t| t.as_str()) == Some("thinking")
             });
         }
     }
