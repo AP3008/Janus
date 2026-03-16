@@ -8,6 +8,10 @@
 [![Last Commit](https://img.shields.io/github/last-commit/AP3008/Janus)](https://github.com/AP3008/Janus/commits)
 [![License](https://img.shields.io/github/license/AP3008/Janus)](LICENSE)
 
+<blockquote>
+        <p><i>'Presiding over all beginnings and transitions, whether abstract or concrete, sacred or profane.'</i></p>
+</blockquote>
+
 An LLM token compression proxy for the Anthropic API. Janus sits between your application and Claude, intelligently compressing requests to reduce token usage and cost without sacrificing context quality.
 
 **1x GenAI Genesis Winner: 🏆 Google Sustainability Hack**
